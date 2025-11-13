@@ -48,6 +48,7 @@ import logging.handlers
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
+from collections import deque
 
 # Load environment variables from .env file (in parent directory)
 env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
@@ -431,6 +432,12 @@ class HybridPTYWrapper:
         self.channel = None
         self.claude_session_registered = False  # Track if Claude's UUID was registered
 
+        # Output buffer for capturing exact permission prompts (1KB ring buffer)
+        self.output_buffer = deque(maxlen=1024)
+        self.buffer_file = f"/tmp/claude_output_{session_id}.txt"
+        self.buffer_lock = threading.Lock()
+        self.logger.info(f"Output buffer initialized: {self.buffer_file}")
+
     def setup_socket_directory(self):
         """Create socket directory if it doesn't exist"""
         os.makedirs(SOCKET_DIR, exist_ok=True)
@@ -751,6 +758,36 @@ class HybridPTYWrapper:
             self.using_alternate_screen = False
             self.logger.info("Exited alternate screen buffer")
 
+    def add_to_output_buffer(self, data):
+        """
+        Add output data to ring buffer and write to file.
+
+        Args:
+            data: Bytes to add to buffer
+        """
+        with self.buffer_lock:
+            # Add to ring buffer (automatically drops oldest if full)
+            self.output_buffer.extend(data)
+
+            # Write entire buffer to file for notification hook to read
+            try:
+                with open(self.buffer_file, 'wb') as f:
+                    f.write(bytes(self.output_buffer))
+            except Exception as e:
+                self.logger.error(f"Failed to write output buffer: {e}")
+
+    def clear_output_buffer(self):
+        """Clear the output buffer (called by notification hook after successful parse)"""
+        with self.buffer_lock:
+            self.output_buffer.clear()
+            try:
+                # Truncate file
+                with open(self.buffer_file, 'wb') as f:
+                    pass  # Empty file
+                self.logger.debug("Output buffer cleared")
+            except Exception as e:
+                self.logger.error(f"Failed to clear output buffer: {e}")
+
     def cleanup(self):
         """Clean up resources"""
         self.logger.info("Starting cleanup")
@@ -771,6 +808,14 @@ class HybridPTYWrapper:
                 self.logger.debug(f"Socket file removed: {self.socket_path}")
             except Exception as e:
                 self.logger.error(f"Error removing socket file: {e}")
+
+        # Remove buffer file
+        if os.path.exists(self.buffer_file):
+            try:
+                os.remove(self.buffer_file)
+                self.logger.debug(f"Buffer file removed: {self.buffer_file}")
+            except Exception as e:
+                self.logger.error(f"Error removing buffer file: {e}")
 
         self.logger.info("Cleanup completed")
 
@@ -923,6 +968,8 @@ class HybridPTYWrapper:
                                 # Claude output - pass through to terminal unchanged
                                 data = os.read(self.master_fd, 1024)
                                 if data:
+                                    # Add to output buffer for permission prompt capture
+                                    self.add_to_output_buffer(data)
                                     # Write to terminal (hooks will capture this)
                                     os.write(sys.stdout.fileno(), data)
                                 else:
@@ -943,6 +990,8 @@ class HybridPTYWrapper:
                                 # Claude output - pass through to stdout (hooks will capture this)
                                 data = os.read(self.master_fd, 1024)
                                 if data:
+                                    # Add to output buffer for permission prompt capture
+                                    self.add_to_output_buffer(data)
                                     os.write(sys.stdout.fileno(), data)
                                 else:
                                     # Claude exited

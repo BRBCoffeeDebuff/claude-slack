@@ -218,6 +218,75 @@ def split_message(text: str, max_length: int = 39000) -> list:
     return chunks
 
 
+def strip_ansi_codes(text):
+    """
+    Strip ANSI escape codes from text.
+
+    Args:
+        text: String with ANSI codes
+
+    Returns:
+        Clean string without ANSI codes
+    """
+    import re
+    # Remove ANSI escape sequences
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    return ansi_escape.sub('', text)
+
+
+def parse_permission_prompt_from_output(output_bytes, session_id):
+    """
+    Parse exact permission prompt text from Claude's terminal output.
+
+    Args:
+        output_bytes: Raw bytes from terminal output buffer
+        session_id: Session ID for buffer file path
+
+    Returns:
+        List of exact permission option strings, or None if not found
+    """
+    try:
+        # Decode bytes to string
+        output_text = output_bytes.decode('utf-8', errors='ignore')
+
+        # Strip ANSI codes
+        clean_text = strip_ansi_codes(output_text)
+
+        debug_log(f"Parsing output buffer ({len(clean_text)} chars)", "PARSE")
+        debug_log(f"Buffer preview: {clean_text[:200]}", "PARSE")
+
+        # Look for numbered options pattern
+        # Claude's format: "1. Option text\n2. Option text\n3. Option text"
+        import re
+
+        # Try to find the permission prompt section
+        # Look for pattern like "1. Approve" or "1. Allow"
+        option_pattern = re.compile(r'^\s*(\d+)\.\s*(.+)$', re.MULTILINE)
+        matches = option_pattern.findall(clean_text)
+
+        if matches:
+            # Extract option texts (ignore the numbers)
+            options = [match[1].strip() for match in matches]
+
+            # Filter to only the last set of numbered options (most recent)
+            # Claude always shows 2-3 options, so take the last 2-3 matches
+            if len(options) >= 2:
+                # Take last 2-3 options (could be 2-option or 3-option prompt)
+                recent_options = options[-3:] if len(options) >= 3 else options[-2:]
+
+                debug_log(f"Found {len(recent_options)} permission options: {recent_options}", "PARSE")
+                return recent_options
+
+        debug_log("No permission options found in buffer", "PARSE")
+        return None
+
+    except Exception as e:
+        debug_log(f"Error parsing permission prompt: {e}", "PARSE")
+        import traceback
+        debug_log(f"Traceback: {traceback.format_exc()}", "PARSE")
+        return None
+
+
 def retry_parse_transcript(transcript_path, max_wait=2.5, check_interval=0.1):
     """
     Poll transcript file until permission prompt data appears or timeout.
@@ -282,15 +351,142 @@ def retry_parse_transcript(transcript_path, max_wait=2.5, check_interval=0.1):
     return None
 
 
-def extract_exact_permission_options(response):
+# Exact Claude Code permission text mapping
+# Based on reverse-engineering Claude's permission system
+# Format: (permission_mode, tool_name, is_dangerous) -> list of exact option strings
+CLAUDE_PERMISSION_TEXT = {
+    # Default mode - 3 options for safe commands
+    ("default", "Bash", False): [
+        "Approve this time",
+        "Approve commands like this for this project",
+        "Deny, tell Claude what to do instead"
+    ],
+    ("default", "Write", False): [
+        "Approve this time",
+        "Approve commands like this for this project",
+        "Deny, tell Claude what to do instead"
+    ],
+    ("default", "Edit", False): [
+        "Approve this time",
+        "Approve commands like this for this project",
+        "Deny, tell Claude what to do instead"
+    ],
+    ("default", "Read", False): [
+        "Approve this time",
+        "Approve commands like this for this project",
+        "Deny, tell Claude what to do instead"
+    ],
+
+    # Default mode - 2 options for dangerous commands
+    ("default", "Bash", True): [
+        "Approve",
+        "Deny"
+    ],
+
+    # Accept edits mode - always 2 options
+    ("acceptEdits", None, None): [
+        "Approve",
+        "Deny"
+    ],
+
+    # Plan mode - usually 2 options
+    ("plan", None, None): [
+        "Approve",
+        "Deny"
+    ],
+}
+
+# Dangerous command patterns (2 options instead of 3)
+DANGEROUS_PATTERNS = [
+    r'rm\s+-rf',
+    r'sudo',
+    r'chmod\s+777',
+    r'mkfs',
+    r'dd\s+if=',
+    r'>\s*/dev/',
+    r'curl.*\|.*sh',
+    r'wget.*\|.*sh',
+]
+
+
+def is_dangerous_command(tool_name, tool_input):
+    """
+    Detect if a command is dangerous (gets 2 options instead of 3).
+
+    Args:
+        tool_name: Name of the tool being used
+        tool_input: Tool input parameters
+
+    Returns:
+        True if dangerous, False otherwise
+    """
+    if tool_name != "Bash":
+        return False
+
+    command = tool_input.get('command', '')
+
+    import re
+    for pattern in DANGEROUS_PATTERNS:
+        if re.search(pattern, command):
+            debug_log(f"Detected dangerous command pattern: {pattern}", "PERMISSION")
+            return True
+
+    return False
+
+
+def get_exact_permission_options(tool_name, tool_input, permission_mode="default"):
+    """
+    Get exact Claude permission options based on context.
+
+    Args:
+        tool_name: Name of tool requiring permission
+        tool_input: Tool input parameters
+        permission_mode: Permission mode from PreToolUse hook (default, acceptEdits, plan)
+
+    Returns:
+        List of exact permission option strings, or None if not found
+    """
+    # Check if dangerous command
+    is_dangerous = is_dangerous_command(tool_name, tool_input)
+
+    # Try exact match first
+    key = (permission_mode, tool_name, is_dangerous)
+    if key in CLAUDE_PERMISSION_TEXT:
+        options = CLAUDE_PERMISSION_TEXT[key]
+        debug_log(f"Found EXACT match: mode={permission_mode}, tool={tool_name}, dangerous={is_dangerous}", "PERMISSION")
+        return options
+
+    # Try wildcard match (any tool in this permission mode)
+    key = (permission_mode, None, None)
+    if key in CLAUDE_PERMISSION_TEXT:
+        options = CLAUDE_PERMISSION_TEXT[key]
+        debug_log(f"Found WILDCARD match: mode={permission_mode}", "PERMISSION")
+        return options
+
+    # Default fallback
+    if is_dangerous:
+        options = ["Approve", "Deny"]
+    else:
+        options = [
+            "Approve this time",
+            "Approve commands like this for this project",
+            "Deny, tell Claude what to do instead"
+        ]
+
+    debug_log(f"Using FALLBACK options: dangerous={is_dangerous}", "PERMISSION")
+    return options
+
+
+def extract_exact_permission_options(response, permission_mode="default"):
     """
     Extract exact permission options from transcript response.
 
     Args:
         response: Transcript response dict with tool_calls
+        permission_mode: Permission mode from hook data
 
     Returns:
-        Tuple of (tool_name, tool_input, exact_options) or (tool_name, tool_input, None)
+        Tuple of (tool_name, tool_input, exact_options)
     """
     if not response or not response.get('tool_calls'):
         return (None, None, None)
@@ -300,13 +496,12 @@ def extract_exact_permission_options(response):
     tool_name = last_tool.get('name', 'Unknown')
     tool_input = last_tool.get('input', {})
 
-    # TODO: In the future, Claude might include exact option text in transcript
-    # For now, we return None and let the caller infer options
-    # This function is a placeholder for when we discover where exact options are stored
+    debug_log(f"Extracted tool: {tool_name}, permission_mode: {permission_mode}", "TRANSCRIPT")
 
-    debug_log(f"Extracted tool: {tool_name}", "TRANSCRIPT")
+    # Get exact options using our mapping
+    exact_options = get_exact_permission_options(tool_name, tool_input, permission_mode)
 
-    return (tool_name, tool_input, None)
+    return (tool_name, tool_input, exact_options)
 
 
 def enhance_notification_message(
@@ -335,9 +530,30 @@ def enhance_notification_message(
 
         # For permission prompts, extract tool details and add numbered options
         if notification_type == "permission_prompt" and os.path.exists(transcript_path):
-            debug_log("Permission prompt detected, using retry parse strategy", "ENHANCE")
+            debug_log("Permission prompt detected, trying output buffer first", "ENHANCE")
 
-            # Use retry loop to get exact data from transcript (Approach #1A)
+            # FIRST: Try to get exact permission text from output buffer
+            exact_options_from_buffer = None
+            buffer_file = f"/tmp/claude_output_{session_id}.txt"
+
+            if os.path.exists(buffer_file):
+                try:
+                    with open(buffer_file, 'rb') as f:
+                        buffer_content = f.read()
+
+                    if buffer_content:
+                        debug_log(f"Read output buffer ({len(buffer_content)} bytes)", "ENHANCE")
+                        exact_options_from_buffer = parse_permission_prompt_from_output(buffer_content, session_id)
+
+                        if exact_options_from_buffer:
+                            debug_log(f"SUCCESS: Got exact options from buffer: {exact_options_from_buffer}", "ENHANCE")
+                        else:
+                            debug_log("Buffer parsing failed, will use transcript fallback", "ENHANCE")
+                except Exception as e:
+                    debug_log(f"Error reading buffer: {e}", "ENHANCE")
+
+            # SECOND: Use retry loop to get tool details from transcript
+            debug_log("Parsing transcript for tool details", "ENHANCE")
             response = retry_parse_transcript(
                 transcript_path,
                 max_wait=2.5,  # 2.5 seconds is generous
@@ -346,9 +562,11 @@ def enhance_notification_message(
 
             if response and response.get('tool_calls'):
                 # Successfully parsed transcript!
-                tool_name, tool_input, exact_options = extract_exact_permission_options(response)
+                # Try to get permission_mode (not available in Notification hook, so we infer)
+                permission_mode = "default"  # Default assumption
+                tool_name, tool_input, exact_options = extract_exact_permission_options(response, permission_mode)
 
-                debug_log(f"Successfully extracted: tool={tool_name}, has_input={bool(tool_input)}", "ENHANCE")
+                debug_log(f"Successfully extracted: tool={tool_name}, has_input={bool(tool_input)}, has_options={bool(exact_options)}", "ENHANCE")
 
                 # Build detailed permission prompt
                 enhanced = f"⚠️ **Permission Required: {tool_name}**\n\n"
@@ -381,24 +599,37 @@ def enhance_notification_message(
                     if snippet:
                         enhanced += f"\n_Context: {snippet}..._\n"
 
-                # Add numbered response options
-                # If we extracted exact options, use them. Otherwise, infer.
-                if exact_options:
-                    debug_log("Using EXACT options from transcript", "ENHANCE")
+                # Add numbered response options with EXACT Claude wording
+                # Priority: Buffer options > Hardcoded mapping > Fallback
+                options_to_use = exact_options_from_buffer or exact_options
+
+                if options_to_use:
+                    if exact_options_from_buffer:
+                        debug_log(f"Using EXACT options from OUTPUT BUFFER ({len(options_to_use)} options)", "ENHANCE")
+                        # Clear buffer after successful extraction
+                        try:
+                            with open(buffer_file, 'wb') as f:
+                                pass  # Truncate file
+                            debug_log("Output buffer cleared", "ENHANCE")
+                        except Exception as e:
+                            debug_log(f"Failed to clear buffer: {e}", "ENHANCE")
+                    else:
+                        debug_log(f"Using hardcoded mapping options ({len(options_to_use)} options)", "ENHANCE")
+
                     enhanced += "\n**Reply with:**\n"
-                    for i, option in enumerate(exact_options, 1):
-                        enhanced += f"{i} - {option}\n"
+                    for i, option in enumerate(options_to_use, 1):
+                        enhanced += f"{i}. {option}\n"
                 else:
-                    debug_log("Using INFERRED options (exact not found in transcript)", "ENHANCE")
-                    # Inferred options (matching Claude's 3-option permission system)
+                    debug_log("WARNING: No exact options found - using fallback", "ENHANCE")
+                    # This shouldn't happen since get_exact_permission_options has fallback
                     enhanced += "\n**Reply with:**\n"
-                    enhanced += "1 - Approve this time\n"
-                    enhanced += "2 - Approve all " + tool_name + " for this session\n"
-                    enhanced += "3 - Deny\n"
+                    enhanced += "1. Approve this time\n"
+                    enhanced += "2. Approve commands like this for this project\n"
+                    enhanced += "3. Deny, tell Claude what to do instead\n"
             else:
                 # Fallback if retry parsing timed out or failed
                 debug_log("Retry parse FAILED/TIMEOUT - using simple fallback", "ENHANCE")
-                enhanced = f"⚠️ {message}\n\n**Reply with:**\n1 - Approve this time\n2 - Approve all for this session\n3 - Deny"
+                enhanced = f"⚠️ {message}\n\n**Reply with:**\n1. Approve this time\n2. Approve commands like this for this project\n3. Deny, tell Claude what to do instead"
 
         # For idle prompts, include context about what Claude last said
         elif notification_type == "idle_prompt" and os.path.exists(transcript_path):
