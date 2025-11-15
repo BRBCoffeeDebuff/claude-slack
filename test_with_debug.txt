@@ -1,0 +1,5 @@
+Testing with enhanced debug logging
+
+This should now show exactly which numbered items are found in the buffer and why they're being rejected.
+
+Test timestamp: 2025-11-13 16:36:00

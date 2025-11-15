@@ -1,0 +1,10 @@
+Testing improved permission prompt parsing - version 2
+
+New features:
+- Permission anchor detection (finds "needs permission", "wants to", etc.)
+- Consecutive numbered list extraction
+- Permission keyword validation (approve, deny, allow, yes, no)
+- Takes FIRST matching group, not last
+- 75ms buffer read delay for complete capture
+
+Test timestamp: 2025-11-13 16:24:30

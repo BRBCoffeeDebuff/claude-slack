@@ -1,0 +1,7 @@
+Testing with NO buffer read delay
+
+Hypothesis: The 75ms delay was causing the buffer to be cleared by Claude's UI updates before we could read it.
+
+Now reading buffer immediately when notification hook fires.
+
+Test timestamp: 2025-11-13 16:32:00

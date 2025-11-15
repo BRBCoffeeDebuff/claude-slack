@@ -1,0 +1,7 @@
+Testing fixed grouping logic
+
+Changed: Now accepts consecutive numbered lists starting from any number (2, 3) not just (1, 2, 3).
+
+This should fix the issue where option 1 scrolls off the buffer before we can read it.
+
+Test timestamp: 2025-11-13 16:39:00

@@ -1,0 +1,10 @@
+This is a test file to verify permission prompt parsing.
+
+The improved regex should now:
+1. Find permission anchor keywords
+2. Extract consecutive numbered lists
+3. Validate with permission keywords (approve, deny, allow, yes, no)
+4. Return the FIRST matching group (not last)
+5. Handle both 2-option and 3-option prompts
+
+Testing timestamp: 2025-11-13 00:00:17
