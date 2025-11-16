@@ -733,10 +733,9 @@ class HybridPTYWrapper:
                         # Inject into Claude's stdin
                         # VibeTunnel mode: use queue (no PTY)
                         if hasattr(self, 'slack_input_queue'):
-                            # VibeTunnel mode - add to queue
-                            self.slack_input_queue.put(data.encode('utf-8'))
-                            time.sleep(0.1)
-                            self.slack_input_queue.put(b'\n')  # Send newline
+                            # VibeTunnel mode - add to queue with newline appended
+                            # IMPORTANT: Put as single item so TIOCSTI injection gets both text + newline
+                            self.slack_input_queue.put(data.encode('utf-8') + b'\n')
                             self.logger.info("Input queued for VibeTunnel mode with newline")
                         else:
                             # Standard mode - write to PTY
@@ -1063,8 +1062,16 @@ class HybridPTYWrapper:
         # VIBETUNNEL OPTIMIZATION: Use no-PTY mode to avoid nested PTY artifacts
         if self.is_vibetunnel():
             self.logger.info("VibeTunnel detected - using no-PTY mode")
-            from core.claude_wrapper_vibetunnel import run_vibetunnel_mode
-            return run_vibetunnel_mode(self)
+            print(f"{YELLOW}[VibeTunnel] Detected - switching to no-PTY mode{RESET}", file=sys.stderr)
+            try:
+                from claude_wrapper_vibetunnel import run_vibetunnel_mode
+                self.logger.info("VibeTunnel module imported successfully")
+                return run_vibetunnel_mode(self)
+            except Exception as e:
+                self.logger.error(f"Failed to import VibeTunnel module: {e}", exc_info=True)
+                print(f"{RED}[VibeTunnel] Failed to load no-PTY mode: {e}{RESET}", file=sys.stderr)
+                print(f"{YELLOW}[VibeTunnel] Falling back to standard PTY mode{RESET}", file=sys.stderr)
+                # Fall through to standard mode
 
         # Setup socket directory
         self.setup_socket_directory()

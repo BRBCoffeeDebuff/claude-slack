@@ -59,7 +59,23 @@ def run_vibetunnel_mode(wrapper):
     claude_cmd = [claude_bin, '--session-id', claude_session_uuid] + wrapper.claude_args
 
     wrapper.logger.info(f"Executing Claude directly: {' '.join(claude_cmd)}")
-    wrapper.print_startup_banner()
+
+    # Print custom VibeTunnel banner
+    CYAN = "\033[36m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
+
+    separator = "─" * 50
+    print(f"\n{BOLD}{CYAN}{separator}{RESET}", file=sys.stderr)
+    print(f"{BOLD}{CYAN}Claude Code Hybrid PTY Wrapper{RESET}", file=sys.stderr)
+    print(f"{CYAN}Session ID: {BOLD}{wrapper.session_id}{RESET}", file=sys.stderr)
+    print(f"{CYAN}Project: {wrapper.project_dir}{RESET}", file=sys.stderr)
+    print(f"{CYAN}Input Socket: {wrapper.socket_path}{RESET}", file=sys.stderr)
+    print(f"{YELLOW}VibeTunnel: No-PTY Mode (direct execution){RESET}", file=sys.stderr)
+    print(f"{GREEN}Hooks will handle output streaming to Slack{RESET}", file=sys.stderr)
+    print(f"{BOLD}{CYAN}{separator}{RESET}\n", file=sys.stderr)
 
     # Fork and exec Claude
     # Child: exec Claude (inherits VibeTunnel's stdin/stdout/stderr)
