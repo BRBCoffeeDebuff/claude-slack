@@ -6,17 +6,18 @@ Slack integration for Claude Code sessions - enables bidirectional communication
 
 This integration allows Claude Code sessions to:
 - Send a claude-code session specific message to a slack channel to seed a new slack thread.
-- Receive act on and respond to messages added to the thread to the original message
-- Support multiple concurrent Claude sessions across different projects
+- Receive,act on, and respond to messages added to the session specific thread
+- Support multiple concurrent Claude sessions across different projects (as separate slack threads)
 - Maintain conversation history and context
 
 ## Architecture
 
-This is a **UNIVERSAL** installation that serves all Claude projects on your machine:
+This installation can serve all Claude projects on your machine:
 - Single installation at `~/.claude/claude-slack`
 - One Slack bot (socket mode enabled) serves all projects
 - Central session registry tracks active sessions
 - Hook templates are copied to each project that needs Slack integration
+- **WARNING**: This hasn't been tested for scenarios where on_stop and/or on_notification hooks already exist for your slack project.  They MIGHT OVERWRITE YOUR EXISTING HOOK FILES (SO BACK THEM UP IN ADVANCE), or more likely, you might need to manually copy the relevant content from the hook templates into your existing hooks if you have them. 
 
 ## Quick Start
 
@@ -130,6 +131,10 @@ cd /path/to/your/project
 # Initialize Slack integration for this project
 claude-slack
 
+# You should receive a new message in the slack channel you added to your .env file
+# You can reply 'as a thread' to the message to communicate with the claude session that sent the initial message
+# If your reply doesn't automatically get a green checkmark emoji applied to it, you need to @mention your claud bot to wake it back up and try your message again.
+# Claude code should receive your message as terminal input, generate it's response, and send it back to slack automatically.  You can continue the conversation as needed.
 
 ```
 
