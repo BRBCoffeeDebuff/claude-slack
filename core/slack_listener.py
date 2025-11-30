@@ -32,7 +32,7 @@ Environment Variables:
     SLACK_SOCKET_PATH - Unix socket path (default: /tmp/claude_slack.sock)
 
 Registry Database:
-    Location: /tmp/claude_sessions/registry.db
+    Location: ~/.claude/slack/registry.db (default, override via REGISTRY_DB_PATH)
     Schema: sessions table with slack_thread_ts -> socket_path mapping
     Handles multiple sessions per thread (wrapper + Claude UUID)
 """
@@ -44,29 +44,34 @@ from pathlib import Path
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from registry_db import RegistryDatabase
+from config import get_registry_db_path, get_socket_dir
 from dotenv import load_dotenv
 
 # Load environment variables from .env file (in parent directory)
 env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
 load_dotenv(env_path)
 
-# Configuration
+# Configuration - use centralized config for consistent paths
 PROJECT_DIR = Path(__file__).parent.parent
 RESPONSE_FILE = PROJECT_DIR / "slack_response.txt"
 SOCKET_PATH = os.environ.get("SLACK_SOCKET_PATH", "/tmp/claude_slack.sock")
-REGISTRY_DB_PATH = "/tmp/claude_sessions/registry.db"
+REGISTRY_DB_PATH = get_registry_db_path()  # Uses ~/.claude/slack/registry.db by default
 
-# Initialize registry database (read-only for socket lookup)
+# Initialize registry database - create directory and DB if needed
 registry_db = None
 try:
-    if os.path.exists(REGISTRY_DB_PATH):
-        registry_db = RegistryDatabase(REGISTRY_DB_PATH)
-        print(f"✅ Connected to registry database: {REGISTRY_DB_PATH}", file=sys.stderr)
-    else:
-        print(f"⚠️  Registry database not found: {REGISTRY_DB_PATH}", file=sys.stderr)
-        print(f"   Falling back to hard-coded socket path", file=sys.stderr)
+    registry_dir = os.path.dirname(REGISTRY_DB_PATH)
+
+    # Create directory if it doesn't exist
+    if not os.path.exists(registry_dir):
+        os.makedirs(registry_dir, exist_ok=True)
+        print(f"📁 Created registry directory: {registry_dir}", file=sys.stderr)
+
+    # Initialize database (creates tables if they don't exist)
+    registry_db = RegistryDatabase(REGISTRY_DB_PATH)
+    print(f"✅ Connected to registry database: {REGISTRY_DB_PATH}", file=sys.stderr)
 except Exception as e:
-    print(f"⚠️  Failed to connect to registry database: {e}", file=sys.stderr)
+    print(f"⚠️  Failed to initialize registry database: {e}", file=sys.stderr)
     print(f"   Falling back to hard-coded socket path", file=sys.stderr)
 
 # Initialize Slack app

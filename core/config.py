@@ -12,7 +12,7 @@ SLACK_INTEGRATION_DIR = Path(__file__).parent.parent.resolve()
 
 # Default configuration
 DEFAULT_CONFIG = {
-    # Socket and registry paths
+    # Socket and registry paths (in user home for portability and persistence)
     'socket_dir': os.path.expanduser('~/.claude/slack/sockets'),
     'registry_db': os.path.expanduser('~/.claude/slack/registry.db'),
     'log_dir': os.path.expanduser('~/.claude/slack/logs'),

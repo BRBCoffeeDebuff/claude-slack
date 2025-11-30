@@ -100,7 +100,7 @@ def run_vibetunnel_mode(wrapper):
         while time.time() - start_time < max_wait:
             try:
                 import sqlite3
-                db_path = "/tmp/claude_sessions/registry.db"
+                db_path = os.environ.get("REGISTRY_DB_PATH", os.path.expanduser("~/.claude/slack/registry.db"))
                 conn = sqlite3.connect(db_path)
                 cursor = conn.cursor()
                 cursor.execute(
