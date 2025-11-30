@@ -1021,8 +1021,7 @@ class HybridPTYWrapper:
                         try:
                             # Query the database directly to check if thread was created
                             import sqlite3
-                            # Use the hardcoded path instead of importing from config to avoid import issues
-                            db_path = "/tmp/claude_sessions/registry.db"
+                            db_path = os.environ.get("REGISTRY_DB_PATH", os.path.expanduser("~/.claude/slack/registry.db"))
                             conn = sqlite3.connect(db_path)
                             cursor = conn.cursor()
                             cursor.execute(

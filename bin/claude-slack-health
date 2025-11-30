@@ -19,7 +19,7 @@ if [ -f "$ENV_FILE" ]; then
     set +a
 fi
 
-# Environment variables (with defaults)
+# Environment variables (with defaults - must match config.py)
 SLACK_LOG_DIR=${SLACK_LOG_DIR:-"$HOME/.claude/slack/logs"}
 REGISTRY_DB_PATH=${REGISTRY_DB_PATH:-"$HOME/.claude/slack/registry.db"}
 
@@ -114,8 +114,26 @@ else
     ISSUES="${ISSUES}\n  - Registry database missing at $REGISTRY_DB_PATH"
 fi
 
-# 5. Check for socket connections (if listener is running)
-echo -n "6. Checking Slack API connection... "
+# 5.5. Check if listener is in fallback mode (critical!)
+echo -n "6. Checking routing mode... "
+LOG_FILE="$SLACK_LOG_DIR/slack_listener.log"
+if [ -f "$LOG_FILE" ]; then
+    if grep -q "Phase 1 Mode" "$LOG_FILE" 2>/dev/null; then
+        echo -e "${RED}✗ DEGRADED - File-based fallback mode${NC}"
+        HEALTHY=false
+        ISSUES="${ISSUES}\n  - Listener in Phase 1 (file) mode - messages won't reach Claude!"
+        ISSUES="${ISSUES}\n    This usually means registry database failed to initialize"
+    elif grep -q "Phase 3 Mode" "$LOG_FILE" 2>/dev/null; then
+        echo -e "${GREEN}✓ Phase 3 (registry-based routing)${NC}"
+    else
+        echo -e "${YELLOW}⚠ Unknown mode - check logs${NC}"
+    fi
+else
+    echo -e "${YELLOW}- Skipped (no log file yet)${NC}"
+fi
+
+# 6. Check for socket connections (if listener is running)
+echo -n "7. Checking Slack API connection... "
 if pgrep -f "slack_listener.py" > /dev/null; then
     PID=$(pgrep -f "slack_listener.py")
     # Check if the process has an established HTTPS connection (to Slack)
@@ -129,13 +147,7 @@ else
     echo -e "${YELLOW}- Skipped (listener not running)${NC}"
 fi
 
-# 6.5. Event heartbeat check REMOVED
-# We removed the watchdog thread because threading breaks Socket Mode event reception
-# The heartbeat file is no longer created, so we skip this check
-echo -n "7. Checking event heartbeat... "
-echo -e "${YELLOW}⊘ Skipped (heartbeat feature removed - threading incompatible with Socket Mode)${NC}"
-
-# 7. Check for log file and recent activity
+# 8. Check for log file and recent activity
 echo -n "8. Checking listener logs... "
 LOG_FILES=("$SLACK_LOG_DIR/slack_listener.log")
 LOG_FOUND=false
@@ -157,7 +169,7 @@ if [ "$LOG_FOUND" = false ]; then
     echo -e "${YELLOW}⚠ No log files found${NC}"
 fi
 
-# 8. Check for duplicate processes
+# 9. Check for duplicate processes
 echo -n "9. Checking for duplicate processes... "
 LISTENER_COUNT=$(pgrep -f "slack_listener.py" | wc -l | tr -d ' ')
 if [ "$LISTENER_COUNT" -eq 0 ]; then
