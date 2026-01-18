@@ -921,6 +921,18 @@ class HybridPTYWrapper:
         self.logger.info("Starting cleanup")
         self.running = False
 
+        # Mark session as inactive in registry
+        if self.registry and self.registry.available:
+            try:
+                self.registry.deactivate_session(self.session_id)
+                self.logger.info(f"Session {self.session_id} marked as inactive")
+                # Also deactivate Claude's session if registered
+                if hasattr(self, 'claude_session_uuid') and self.claude_session_uuid:
+                    self.registry.deactivate_session(self.claude_session_uuid)
+                    self.logger.info(f"Claude session {self.claude_session_uuid[:8]} marked as inactive")
+            except Exception as e:
+                self.logger.error(f"Error deactivating session: {e}")
+
         # Close socket
         if self.socket:
             try:

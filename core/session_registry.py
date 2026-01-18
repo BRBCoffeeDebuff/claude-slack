@@ -343,6 +343,40 @@ class SessionRegistry:
         """
         return self.db.list_sessions(status)
 
+    def deactivate_session(self, session_id: str) -> bool:
+        """
+        Mark a session as inactive (called during cleanup).
+
+        Unlike unregister_session, this preserves the session record for
+        history/debugging but marks it as no longer active.
+
+        Args:
+            session_id: Session identifier
+
+        Returns:
+            True if session was deactivated, False if not found
+        """
+        session = self.db.get_session(session_id)
+        if not session:
+            self._log(f"Session not found for deactivation: {session_id}")
+            return False
+
+        # Mark as inactive
+        self.db.update_session(session_id, {'status': 'inactive'})
+        self._log(f"Session {session_id} marked as inactive")
+
+        # Post a closing message to Slack thread if available
+        if self.slack_client and session.get("thread_ts") and session.get("channel"):
+            try:
+                self.slack_client.chat_postMessage(
+                    channel=session.get("channel"),
+                    thread_ts=session.get("thread_ts"),
+                    text="🔚 Session ended"
+                )
+            except Exception as e:
+                self._log(f"Failed to post session end message: {e}")
+
+        return True
 
     def get_by_thread(self, thread_ts: str) -> Optional[Dict[str, Any]]:
         """
