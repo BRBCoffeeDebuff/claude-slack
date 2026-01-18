@@ -153,8 +153,12 @@ The manifest includes two tiers of permissions:
 | `channels:manage` | Auto-create channels | No (manual create) |
 | `chat:write.public` | Post without joining | No |
 | `groups:*` | Private channel support | No |
-| `im:*` | Direct message support | No |
+| `im:history` | Read DM messages | **Yes for DM Mode** |
+| `im:read` | View DMs | **Yes for DM Mode** |
+| `im:write` | Send DMs | **Yes for DM Mode** |
 | `mpim:*` | Group DM support | No |
+
+**Note:** DM Mode requires the `im:*` scopes AND the `message.im` event subscription. If you can't DM the bot, reinstall the app after adding these scopes.
 
 ### 2. Configure Environment
 
