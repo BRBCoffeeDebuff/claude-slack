@@ -368,8 +368,8 @@ class TestDMCommandHandlingIntegration:
         sub = integration_db.get_dm_subscription_for_user(user_id)
         assert sub is None
 
-    def test_non_command_returns_false(self, integration_db, mock_slack_client):
-        """Regular messages return False (not handled as command)."""
+    def test_non_command_tells_user_to_attach(self, integration_db, mock_slack_client):
+        """Regular messages tell user to attach when not subscribed to a session."""
         say = MagicMock()
 
         result = handle_dm_message(
@@ -381,5 +381,9 @@ class TestDMCommandHandlingIntegration:
             say=say
         )
 
-        assert result is False
-        assert not say.called
+        # Now handled - user is told how to attach
+        assert result is True
+        assert say.called
+        call_args = say.call_args
+        assert '/sessions' in call_args.kwargs['text']
+        assert '/attach' in call_args.kwargs['text']

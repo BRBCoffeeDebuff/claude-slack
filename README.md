@@ -70,6 +70,7 @@ claude-slack -c my-project-channel
 | `claude_wrapper_hybrid.py` | Wraps Claude Code, creates sockets for bidirectional I/O |
 | `session_registry.py` | Daemon managing sessions via Unix socket IPC |
 | `registry_db.py` | SQLite database for session state (WAL mode for concurrency) |
+| `dm_mode.py` | DM commands (/sessions, /attach, /detach, /mode) and user preferences |
 | Hooks (`on_notification.py`, `on_stop.py`, `on_posttooluse.py`) | Post to Slack on permission prompts, completions, and todo updates |
 
 ## Operating Modes
@@ -246,6 +247,55 @@ The `claude-slack` command auto-starts the listener if needed.
 
 ---
 
+## DM Mode
+
+DM Mode lets you interact with Claude sessions directly via Slack direct messages. This is useful for:
+- Monitoring session output from your phone
+- Sending messages to Claude without switching channels
+- Using different interaction modes (Research, Plan, Execute)
+
+### DM Commands
+
+Send these commands as direct messages to the bot:
+
+| Command | Description |
+|---------|-------------|
+| `/sessions` | List all active Claude sessions |
+| `/attach <session_id>` | Subscribe to a session's output |
+| `/attach <session_id> 10` | Subscribe and fetch last 10 messages |
+| `/detach` | Unsubscribe from current session |
+| `/mode` | Show your current interaction mode |
+| `/mode research` | Set mode to Research (read-only analysis) |
+| `/mode plan` | Set mode to Plan (design approach) |
+| `/mode execute` | Set mode to Execute (implement changes) |
+
+### Interaction Modes
+
+When attached to a session, you can set an interaction mode that appends instructions to your messages:
+
+| Mode | Purpose |
+|------|---------|
+| **execute** | Default - implement changes, write code |
+| **research** | Read-only exploration, no file modifications |
+| **plan** | Design approach without writing implementation |
+
+**Example workflow:**
+```
+/sessions                    # List active sessions
+/attach abc12345             # Subscribe to session
+/mode research               # Set to research mode
+What files handle auth?      # Message sent with research instructions
+/mode execute                # Switch to execute mode
+Fix the login bug            # Message sent normally
+/detach                      # Unsubscribe when done
+```
+
+When you send a message while attached, you'll see confirmation like:
+- `✅ Sent to Claude` (execute mode)
+- `✅ Sent to Claude [research]` (with mode indicator)
+
+---
+
 ## Command Reference
 
 | Command | Description |
@@ -352,7 +402,8 @@ claude-slack-service restart
 │   ├── slack_listener.py          # Slack event listener
 │   ├── claude_wrapper_hybrid.py   # Claude Code wrapper with I/O capture
 │   ├── session_registry.py        # Session management daemon
-│   ├── registry_db.py             # SQLite operations
+│   ├── registry_db.py             # SQLite operations (sessions, DM subscriptions, user prefs)
+│   ├── dm_mode.py                 # DM commands and interaction modes
 │   ├── transcript_parser.py       # Parse Claude transcripts
 │   └── config.py                  # Centralized configuration
 ├── .claude/

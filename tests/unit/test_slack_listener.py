@@ -542,15 +542,14 @@ class TestHandleDMCommands:
         sub = temp_registry_db.get_dm_subscription_for_user('U123456')
         assert sub is None
 
-    def test_dm_commands_only_in_dm(self, temp_registry_db, sample_session_data):
-        """/sessions in channel is ignored (not processed as DM command)."""
+    def test_dm_non_command_guides_user(self, temp_registry_db, sample_session_data):
+        """Non-command DMs now return True and guide user to attach."""
         from slack_listener import handle_dm_message
 
-        # handle_dm_message should return False if not a DM command
-        # When called from a channel context, should return False
+        # handle_dm_message now handles non-commands by guiding users to attach
         say = MagicMock()
 
-        # Regular message (not a command) returns False
+        # Regular message (not a command) returns True and provides guidance
         result = handle_dm_message(
             text='hello',
             user_id='U123456',
@@ -560,5 +559,9 @@ class TestHandleDMCommands:
             say=say
         )
 
-        assert result is False
-        assert not say.called
+        assert result is True
+        assert say.called
+        # Should tell user how to attach
+        call_args = say.call_args
+        assert '/sessions' in call_args.kwargs['text']
+        assert '/attach' in call_args.kwargs['text']
