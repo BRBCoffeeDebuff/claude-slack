@@ -652,19 +652,18 @@ class TestPermissionNotificationBehavior:
         use_buttons = exact_options_from_buffer is not None
         assert use_buttons is False
 
-    def test_permission_options_always_set_for_emoji_reactions(self):
-        """permission_options should always be set for emoji reactions."""
-        # Even when buttons aren't shown, permission_options should be set
-        # so emoji reactions can be added
-        fallback_options = [
-            "Approve this time",
-            "Approve commands like this for this project",
-            "Deny, tell Claude what to do instead"
-        ]
-        # permission_options is set even for fallback
-        permission_options = fallback_options
-        assert permission_options is not None
-        assert len(permission_options) == 3
+    def test_permission_options_none_when_buffer_parsing_fails(self):
+        """permission_options should be None when buffer parsing fails (SAFETY).
+
+        When we can't parse exact options from the terminal buffer, we don't
+        know how many options the CLI actually has. Setting permission_options
+        would add emoji reactions that might not match CLI options, causing
+        the user to accidentally send the wrong response number.
+        """
+        # When buffer parsing fails, permission_options should be None
+        # This prevents misleading emoji reactions
+        permission_options = None  # This is what we set when fallback is used
+        assert permission_options is None
 
     def test_should_show_buttons_with_mismatched_options_returns_false(self):
         """Options that don't match exact patterns should not show buttons."""

@@ -2,9 +2,10 @@
 """
 Claude Code Notification Hook - Post Notifications to Slack
 
-Version: 2.3.0
+Version: 2.4.0
 
 Changelog:
+- v2.4.0 (2026/01/18): SAFETY FIX - No emoji reactions when buffer parsing fails (prevents option mismatch)
 - v2.3.0 (2026/01/18): Clean up stale permission messages before posting new notifications
 - v2.2.0 (2026/01/17): Added custom channel mode support (top-level messages, no threads)
 - v2.1.0 (2025/11/18): Fixed early termination bug - continue posting remaining chunks on failure
@@ -62,7 +63,7 @@ from pathlib import Path
 from datetime import datetime
 
 # Hook version (for auto-updates)
-HOOK_VERSION = "2.3.0"
+HOOK_VERSION = "2.4.0"
 
 # Log directory - use ~/.claude/slack/logs as default
 LOG_DIR = os.environ.get("SLACK_LOG_DIR", os.path.expanduser("~/.claude/slack/logs"))
@@ -979,39 +980,29 @@ def enhance_notification_message(
                         permission_options = options_to_use
                         use_buttons = True
                     else:
-                        debug_log(f"Using hardcoded mapping options ({len(options_to_use)} options) - NO BUTTONS (unsafe)", "ENHANCE")
-                        # Still set permission_options for emoji reactions, but no buttons
-                        permission_options = options_to_use
+                        debug_log(f"Using hardcoded mapping options ({len(options_to_use)} options) - NO BUTTONS, NO REACTIONS (unsafe - may mismatch CLI)", "ENHANCE")
+                        # SAFETY: Don't set permission_options - we don't know actual CLI option count
+                        # Emoji reactions could cause user to send wrong number to CLI
+                        permission_options = None
                         use_buttons = False
 
-                    # ALWAYS add the full text with numbered options
+                    # ALWAYS add the full text with numbered options (for reference only when fallback)
                     enhanced += "\n**Reply with:**\n"
                     for i, option in enumerate(options_to_use, 1):
                         enhanced += f"{i}. {option}\n"
                 else:
-                    debug_log("WARNING: No exact options found - using fallback, NO BUTTONS", "ENHANCE")
-                    # Use fallback options for emoji reactions
-                    permission_options = [
-                        "Approve this time",
-                        "Approve commands like this for this project",
-                        "Deny, tell Claude what to do instead"
-                    ]
+                    debug_log("WARNING: No exact options found - NO BUTTONS, NO REACTIONS", "ENHANCE")
+                    # SAFETY: Don't add any reactions - we don't know actual option count
+                    permission_options = None
                     use_buttons = False
-                    enhanced += "\n**Reply with:**\n"
-                    enhanced += "1. Approve this time\n"
-                    enhanced += "2. Approve commands like this for this project\n"
-                    enhanced += "3. Deny, tell Claude what to do instead\n"
+                    enhanced += "\n**Reply with a number from the terminal prompt**"
             else:
                 # Fallback if retry parsing timed out or failed
-                debug_log("Retry parse FAILED/TIMEOUT - using simple fallback, NO BUTTONS", "ENHANCE")
-                # Use fallback options for emoji reactions
-                permission_options = [
-                    "Approve this time",
-                    "Approve commands like this for this project",
-                    "Deny, tell Claude what to do instead"
-                ]
+                debug_log("Retry parse FAILED/TIMEOUT - NO BUTTONS, NO REACTIONS", "ENHANCE")
+                # SAFETY: Don't add any reactions - we don't know actual option count
+                permission_options = None
                 use_buttons = False
-                enhanced = f"⚠️ {message}\n\n**Reply with:**\n1. Approve this time\n2. Approve commands like this for this project\n3. Deny, tell Claude what to do instead"
+                enhanced = f"⚠️ {message}\n\n**Reply with a number from the terminal prompt**"
 
         # For idle prompts, include context about what Claude last said
         elif notification_type == "idle_prompt" and os.path.exists(transcript_path):
