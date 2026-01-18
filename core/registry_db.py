@@ -38,8 +38,9 @@ class SessionRecord(Base):
     socket_path = Column(String(512), nullable=False)  # Unix socket path
 
     # Slack integration
-    slack_thread_ts = Column(String(50), nullable=True)  # Thread timestamp
+    slack_thread_ts = Column(String(50), nullable=True)  # Thread timestamp (None for custom channel mode)
     slack_channel = Column(String(50), nullable=True)    # Channel ID
+    permissions_channel = Column(String(50), nullable=True)  # Separate channel for permissions
     slack_user_id = Column(String(50), nullable=True)    # User ID who initiated session
 
     # Status tracking
@@ -65,6 +66,7 @@ class SessionRecord(Base):
             'socket_path': self.socket_path,
             'thread_ts': self.slack_thread_ts,
             'channel': self.slack_channel,
+            'permissions_channel': self.permissions_channel,
             'slack_user_id': self.slack_user_id,
             'status': self.status,
             'created_at': self.created_at.isoformat() if self.created_at else None,
@@ -122,13 +124,20 @@ class RegistryDatabase:
         Migrations are idempotent - safe to run multiple times.
         """
         with self.engine.connect() as conn:
-            # Check if project_dir column exists, add if not
+            # Check existing columns
             result = conn.execute(text("PRAGMA table_info(sessions)"))
             columns = [row[1] for row in result.fetchall()]
 
+            # Add project_dir column if not exists
             if 'project_dir' not in columns:
                 print(f"[Migration] Adding project_dir column to sessions table", flush=True)
                 conn.execute(text("ALTER TABLE sessions ADD COLUMN project_dir VARCHAR(512)"))
+                conn.commit()
+
+            # Add permissions_channel column if not exists
+            if 'permissions_channel' not in columns:
+                print(f"[Migration] Adding permissions_channel column to sessions table", flush=True)
+                conn.execute(text("ALTER TABLE sessions ADD COLUMN permissions_channel VARCHAR(50)"))
                 conn.commit()
 
     @contextmanager
@@ -177,6 +186,7 @@ class RegistryDatabase:
                 socket_path=session_data['socket_path'],
                 slack_thread_ts=session_data.get('thread_ts'),
                 slack_channel=session_data.get('channel'),
+                permissions_channel=session_data.get('permissions_channel'),
                 slack_user_id=session_data.get('slack_user_id'),
                 status='active',
                 created_at=datetime.now(),
@@ -195,7 +205,7 @@ class RegistryDatabase:
 
             # Update allowed fields
             for key, value in updates.items():
-                if key in ('slack_thread_ts', 'slack_channel', 'slack_user_id', 'status', 'last_activity', 'project_dir'):
+                if key in ('slack_thread_ts', 'slack_channel', 'permissions_channel', 'slack_user_id', 'status', 'last_activity', 'project_dir'):
                     setattr(record, key, value)
 
             # Always update last_activity on any update

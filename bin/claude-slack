@@ -26,6 +26,7 @@ NC='\033[0m' # No Color
 # Parse arguments
 SESSION_DESCRIPTION=""
 SESSION_CHANNEL=""
+PERMISSIONS_CHANNEL=""
 CLAUDE_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -38,22 +39,27 @@ while [[ $# -gt 0 ]]; do
             SESSION_CHANNEL="$2"
             shift 2
             ;;
+        -p|--permissions-channel)
+            PERMISSIONS_CHANNEL="$2"
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: claude-slack [OPTIONS] [CLAUDE_ARGS...]"
             echo ""
             echo "Launch Claude Code with Slack integration"
             echo ""
             echo "Options:"
-            echo "  -d, --description TEXT  Optional description for the Slack thread"
-            echo "  -c, --channel CHANNEL   Post to a specific Slack channel (overrides default)"
-            echo "                          Can be channel name (#my-channel) or ID (C1234567)"
-            echo "  -h, --help              Show this help message"
+            echo "  -d, --description TEXT     Optional description for the Slack thread"
+            echo "  -c, --channel CHANNEL      Post to a specific Slack channel (overrides default)"
+            echo "                             Uses top-level messages (no threading)"
+            echo "  -p, --permissions-channel  Separate channel for permission prompts"
+            echo "  -h, --help                 Show this help message"
             echo ""
             echo "Examples:"
             echo "  claude-slack"
             echo "  claude-slack -d \"Working on auth feature\""
             echo "  claude-slack -c \"#project-updates\" -d \"Daily standup\""
-            echo "  claude-slack --channel project-channel --description \"Bug fix for issue #123\""
+            echo "  claude-slack -c \"#dev-logs\" -p \"#dev-permissions\""
             exit 0
             ;;
         *)
@@ -188,7 +194,10 @@ if [ -n "$SESSION_DESCRIPTION" ]; then
     echo -e "${BLUE}Description: ${SESSION_DESCRIPTION}${NC}"
 fi
 if [ -n "$SESSION_CHANNEL" ]; then
-    echo -e "${BLUE}Channel: ${SESSION_CHANNEL}${NC}"
+    echo -e "${BLUE}Channel: ${SESSION_CHANNEL} (top-level messages)${NC}"
+fi
+if [ -n "$PERMISSIONS_CHANNEL" ]; then
+    echo -e "${BLUE}Permissions Channel: ${PERMISSIONS_CHANNEL}${NC}"
 fi
 echo ""
 
@@ -199,6 +208,9 @@ if [ -n "$SESSION_DESCRIPTION" ]; then
 fi
 if [ -n "$SESSION_CHANNEL" ]; then
     WRAPPER_ARGS+=("--channel" "$SESSION_CHANNEL")
+fi
+if [ -n "$PERMISSIONS_CHANNEL" ]; then
+    WRAPPER_ARGS+=("--permissions-channel" "$PERMISSIONS_CHANNEL")
 fi
 
 # Pass description, channel, and Claude args to the Python wrapper

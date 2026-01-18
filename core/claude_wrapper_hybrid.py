@@ -374,7 +374,7 @@ class RegistryClient:
             debug_log(f"Registry communication error: {e}")
             return None
 
-    def register(self, project, terminal, socket_path, project_dir=None, description=None, custom_channel=None):
+    def register(self, project, terminal, socket_path, project_dir=None, description=None, custom_channel=None, permissions_channel=None):
         """Register session with registry and create Slack thread"""
         data = {
             "session_id": self.session_id,
@@ -386,7 +386,9 @@ class RegistryClient:
         if description:
             data["description"] = description
         if custom_channel:
-            data["custom_channel"] = custom_channel  # Override default channel
+            data["custom_channel"] = custom_channel  # Override default channel (top-level messages)
+        if permissions_channel:
+            data["permissions_channel"] = permissions_channel  # Separate channel for permissions
 
         response = self._send_command("REGISTER", data)
 
@@ -404,12 +406,13 @@ class RegistryClient:
 class HybridPTYWrapper:
     """Hybrid PTY wrapper combining input control with hooks output"""
 
-    def __init__(self, session_id, project_dir, claude_args=None, description=None, channel=None):
+    def __init__(self, session_id, project_dir, claude_args=None, description=None, channel=None, permissions_channel=None):
         self.session_id = session_id
         self.project_dir = project_dir
         self.claude_args = claude_args or []
         self.description = description  # Optional description for Slack thread
-        self.custom_channel = channel   # Optional channel override
+        self.custom_channel = channel   # Optional channel override (uses top-level messages)
+        self.permissions_channel = permissions_channel  # Separate channel for permissions
 
         # Setup logging
         self.logger = setup_logging(session_id)
@@ -421,7 +424,9 @@ class HybridPTYWrapper:
         if description:
             self.logger.info(f"Description: {description}")
         if channel:
-            self.logger.info(f"Custom channel: {channel}")
+            self.logger.info(f"Custom channel: {channel} (top-level messages)")
+        if permissions_channel:
+            self.logger.info(f"Permissions channel: {permissions_channel}")
         self.logger.info(f"Python version: {sys.version}")
         self.logger.info(f"Working directory: {os.getcwd()}")
 
@@ -585,7 +590,8 @@ class HybridPTYWrapper:
             terminal=terminal,
             socket_path=self.socket_path,
             description=self.description,
-            custom_channel=self.custom_channel
+            custom_channel=self.custom_channel,
+            permissions_channel=self.permissions_channel
         )
 
         if success:
@@ -1169,6 +1175,7 @@ def main():
     parser.add_argument("--session-id", help="Unique session ID (auto-generated if not provided)")
     parser.add_argument("--description", "-d", help="Optional description for the Slack thread")
     parser.add_argument("--channel", "-c", help="Slack channel for this session (overrides default)")
+    parser.add_argument("--permissions-channel", "-p", help="Separate channel for permission prompts")
     parser.add_argument("--help", "-h", action="store_true", help="Show help message")
 
     # Parse known args, remaining go to Claude
@@ -1191,7 +1198,8 @@ def main():
         project_dir=project_dir,
         claude_args=claude_args,
         description=args.description,
-        channel=args.channel
+        channel=args.channel,
+        permissions_channel=args.permissions_channel
     )
 
     # Run wrapper

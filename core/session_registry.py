@@ -633,25 +633,45 @@ class SessionRegistry:
         """
         Create Slack thread for new session (simplified for hooks-based system)
 
+        For custom channels: No parent thread - messages go as top-level posts
+        For default channel: Creates a parent thread message
+
         Args:
             session_data: Session data dict, may include:
-                - custom_channel: Override channel for this session
+                - custom_channel: Override channel for this session (uses top-level messages)
+                - permissions_channel: Separate channel for permission prompts
                 - description/user_label: Optional description for thread
 
         Returns:
-            {"slack_thread_ts": "...", "slack_channel": "..."}
+            {"slack_thread_ts": "...", "slack_channel": "...", "permissions_channel": "..."}
         """
         if not self.slack_client:
             raise RuntimeError("Slack client not initialized")
 
         # Determine which channel to use (custom_channel overrides default)
-        target_channel = session_data.get('custom_channel') or self.slack_channel
+        custom_channel = session_data.get('custom_channel')
+        target_channel = custom_channel or self.slack_channel
+        permissions_channel = session_data.get('permissions_channel')
 
-        # Normalize channel name (strip # prefix if present)
+        # Normalize channel names (strip # prefix if present)
         if target_channel.startswith('#'):
             target_channel = target_channel[1:]
+        if permissions_channel and permissions_channel.startswith('#'):
+            permissions_channel = permissions_channel[1:]
 
         self._log(f"Creating Slack thread in channel: {target_channel}")
+        if permissions_channel:
+            self._log(f"Permissions channel: {permissions_channel}")
+
+        # For custom channels, use top-level messages (no parent thread)
+        if custom_channel:
+            self._log(f"Custom channel mode: using top-level messages (no thread)")
+            # Just return the channel info, no thread_ts
+            return {
+                "slack_thread_ts": None,  # No threading for custom channels
+                "slack_channel": target_channel,
+                "permissions_channel": permissions_channel
+            }
 
         # Get optional description
         description = session_data.get('description') or session_data.get('user_label')
@@ -705,7 +725,8 @@ class SessionRegistry:
 
         return {
             "slack_thread_ts": response["ts"],
-            "slack_channel": response["channel"]
+            "slack_channel": response["channel"],
+            "permissions_channel": permissions_channel
         }
 
     def _archive_slack_thread(self, session: Dict[str, Any]):

@@ -467,54 +467,67 @@ def handle_permission_button(ack, body, client):
             print(f"⚠️  Missing response or thread_ts in button click", file=sys.stderr)
             return
 
-        # Send the numeric response to Claude
+        # For "deny" option (button 3), prompt user for feedback instead of sending immediately
+        if response == "3":
+            print(f"🔘 Deny button clicked - prompting for feedback", file=sys.stderr)
+            try:
+                # Update the message to prompt for feedback
+                client.chat_update(
+                    channel=channel,
+                    ts=message_ts,
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"❌ *<@{user_id}> denied the request*\n\n💬 Please reply in this thread with instructions for Claude:"
+                            }
+                        }
+                    ],
+                    text="Permission denied - please reply with feedback"
+                )
+                print(f"🔘 Prompting user for feedback in thread", file=sys.stderr)
+                # Don't send response yet - wait for user's follow-up message
+                return
+            except Exception as e:
+                print(f"⚠️  Could not update message for feedback prompt: {e}", file=sys.stderr)
+                # Fall through to send "3" directly
+
+        # Send the numeric response to Claude (for approve options, or fallback for deny)
         mode = send_response(response, thread_ts=thread_ts)
         print(f"🔘 Button '{response}' from {user_name} → sent via {mode}", file=sys.stderr)
 
-        # Update the original message to show the selection
+        # Delete the permission message to keep the channel clean
         try:
-            # Get the original blocks
-            original_blocks = message.get("blocks", [])
-
-            # Find the selected option text from the buttons
-            selected_text = None
-            for block in original_blocks:
-                if block.get("type") == "actions":
-                    for element in block.get("elements", []):
-                        if element.get("value") == response:
-                            selected_text = element.get("text", {}).get("text", f"Option {response}")
-                            break
-
-            # Build updated blocks - remove buttons, add selection confirmation
-            updated_blocks = []
-            for block in original_blocks:
-                if block.get("type") == "actions":
-                    # Replace actions block with selection confirmation
-                    updated_blocks.append({
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"✅ *<@{user_id}> selected:* {selected_text}"
-                        }
-                    })
-                elif block.get("type") == "context" and "Click a button" in str(block):
-                    # Remove the instruction context
-                    continue
-                else:
-                    updated_blocks.append(block)
-
-            # Update the message
-            client.chat_update(
+            client.chat_delete(
                 channel=channel,
-                ts=message_ts,
-                blocks=updated_blocks,
-                text=f"Permission response: {selected_text}"
+                ts=message_ts
             )
-            print(f"🔘 Message updated to show selection", file=sys.stderr)
+            print(f"🔘 Permission message deleted (keeping channel clean)", file=sys.stderr)
 
         except Exception as e:
-            print(f"⚠️  Could not update message after button click: {e}", file=sys.stderr)
-            # Don't fail the whole operation - the response was already sent
+            # If deletion fails (e.g., bot lacks permissions), fall back to updating the message
+            print(f"⚠️  Could not delete message, falling back to update: {e}", file=sys.stderr)
+            try:
+                # Update to show selection confirmation
+                client.chat_update(
+                    channel=channel,
+                    ts=message_ts,
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"✅ *<@{user_id}> approved* (option {response})"
+                            }
+                        }
+                    ],
+                    text=f"Permission approved (option {response})"
+                )
+                print(f"🔘 Message updated to show approval (fallback)", file=sys.stderr)
+            except Exception as e2:
+                print(f"⚠️  Could not update message either: {e2}", file=sys.stderr)
+                # Don't fail - the response was already sent
 
     except Exception as e:
         print(f"❌ Error handling button click: {e}", file=sys.stderr)

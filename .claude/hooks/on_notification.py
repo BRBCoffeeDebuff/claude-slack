@@ -1029,11 +1029,11 @@ def enhance_notification_message(
 def post_to_slack(channel: str, thread_ts: str, text: str, bot_token: str, add_number_reactions: bool = False,
                    use_interactive_buttons: bool = False, permission_options: list = None):
     """
-    Post message to Slack thread, handling long messages.
+    Post message to Slack channel or thread, handling long messages.
 
     Args:
         channel: Slack channel ID
-        thread_ts: Thread timestamp
+        thread_ts: Thread timestamp (None for top-level messages in custom channel mode)
         text: Message text
         bot_token: Slack bot token
         add_number_reactions: If True, add 1️⃣ 2️⃣ 3️⃣ reactions for quick responses (legacy)
@@ -1074,11 +1074,15 @@ def post_to_slack(channel: str, thread_ts: str, text: str, bot_token: str, add_n
             else:
                 message_text = chunk
 
-            response = client.chat_postMessage(
-                channel=channel,
-                thread_ts=thread_ts,
-                text=message_text
-            )
+            # Only include thread_ts if provided (omit for top-level messages)
+            post_kwargs = {
+                "channel": channel,
+                "text": message_text
+            }
+            if thread_ts:
+                post_kwargs["thread_ts"] = thread_ts
+
+            response = client.chat_postMessage(**post_kwargs)
 
             # Save the message timestamp for adding reactions
             last_message_ts = response.get("ts")
@@ -1198,7 +1202,9 @@ def post_permission_card(client, channel: str, thread_ts: str, text: str, permis
 
     for i, option in enumerate(permission_options[:3], 1):
         # Truncate long option text for button label
-        label = option[:70] + "..." if len(option) > 70 else option
+        # Slack button text limit is 75 chars, we use "X. " prefix (3 chars) so max 72 for label
+        max_label_len = 69  # 75 - 3 (prefix) - 3 (ellipsis)
+        label = option[:max_label_len] + "..." if len(option) > max_label_len else option
 
         button = {
             "type": "button",
@@ -1238,12 +1244,16 @@ def post_permission_card(client, channel: str, thread_ts: str, text: str, permis
     })
 
     try:
-        response = client.chat_postMessage(
-            channel=channel,
-            thread_ts=thread_ts,
-            text=f"Permission Required: {tool_name}",  # Fallback text
-            blocks=blocks
-        )
+        # Only include thread_ts if provided (omit for top-level messages)
+        post_kwargs = {
+            "channel": channel,
+            "text": f"Permission Required: {tool_name}",  # Fallback text
+            "blocks": blocks
+        }
+        if thread_ts:
+            post_kwargs["thread_ts"] = thread_ts
+
+        response = client.chat_postMessage(**post_kwargs)
         debug_log(f"Permission card posted successfully: {response.get('ts')}", "SLACK")
         log_info("Posted permission card to Slack")
         return True
@@ -1343,13 +1353,29 @@ def main():
 
         # Extract Slack metadata
         slack_channel = session.get("channel")
-        slack_thread_ts = session.get("thread_ts")
+        slack_thread_ts = session.get("thread_ts")  # May be None for custom channel mode
+        permissions_channel = session.get("permissions_channel")  # Separate channel for permissions
+
         debug_log(f"Slack channel: {slack_channel}", "SLACK")
         debug_log(f"Slack thread_ts: {slack_thread_ts}", "SLACK")
+        debug_log(f"Permissions channel: {permissions_channel}", "SLACK")
 
-        # SELF-HEALING: If session exists but Slack metadata is missing
-        if not slack_channel or not slack_thread_ts:
-            log_info(f"Session {session_id[:8]} missing Slack metadata, attempting self-heal...")
+        # Determine which channel to use for this notification
+        is_permission_prompt = notification_type == "permission_prompt"
+        if is_permission_prompt and permissions_channel:
+            # Use dedicated permissions channel
+            target_channel = permissions_channel
+            target_thread_ts = None  # Permissions channel uses top-level messages
+            debug_log(f"Using permissions channel: {target_channel}", "SLACK")
+        else:
+            target_channel = slack_channel
+            target_thread_ts = slack_thread_ts
+            debug_log(f"Using main channel: {target_channel}, thread_ts: {target_thread_ts}", "SLACK")
+
+        # SELF-HEALING: If session exists but Slack channel is missing
+        # Note: thread_ts can be None for custom channel mode (top-level messages)
+        if not target_channel:
+            log_info(f"Session {session_id[:8]} missing Slack channel, attempting self-heal...")
             debug_log("Attempting self-healing for missing Slack metadata", "REGISTRY")
 
             # Strategy: Look for any active session with matching project_dir that has Slack metadata
@@ -1357,15 +1383,16 @@ def main():
                 debug_log(f"Looking for session with project_dir and Slack metadata: {project_dir}", "REGISTRY")
                 matching_session = db.get_by_project_dir(project_dir, status='active')
 
-                if matching_session and matching_session.get("thread_ts") and matching_session.get("channel"):
+                if matching_session and matching_session.get("channel"):
                     log_info(f"Found matching session with Slack metadata: {matching_session.get('session_id', 'unknown')[:8]}")
                     debug_log(f"Found thread_ts={matching_session.get('thread_ts')}, channel={matching_session.get('channel')}", "REGISTRY")
 
                     # Use the found session's Slack metadata
-                    slack_channel = matching_session.get("channel")
-                    slack_thread_ts = matching_session.get("thread_ts")
+                    target_channel = matching_session.get("channel")
+                    if not (is_permission_prompt and permissions_channel):
+                        target_thread_ts = matching_session.get("thread_ts")
 
-                    log_info(f"Self-healed via project_dir: thread_ts={slack_thread_ts}, channel={slack_channel}")
+                    log_info(f"Self-healed via project_dir: channel={target_channel}, thread_ts={target_thread_ts}")
                     debug_log("Self-healing successful via project_dir lookup", "REGISTRY")
                 else:
                     log_error(f"Self-healing failed: no session with Slack metadata found for project_dir")
@@ -1375,12 +1402,12 @@ def main():
                 log_error(f"Session {session_id[:8]} missing Slack metadata and no project_dir for self-healing")
                 sys.exit(0)
 
-        # Final check after self-healing attempt
-        if not slack_channel or not slack_thread_ts:
-            log_error(f"Session {session_id[:8]} missing Slack metadata after self-healing (channel={slack_channel}, thread_ts={slack_thread_ts})")
+        # Final check - need at least a channel
+        if not target_channel:
+            log_error(f"Session {session_id[:8]} missing Slack channel after self-healing")
             sys.exit(0)
 
-        log_info(f"Found Slack thread: {slack_channel} / {slack_thread_ts}")
+        log_info(f"Using Slack channel: {target_channel}, thread_ts: {target_thread_ts}")
 
         # Get Slack bot token
         bot_token = os.environ.get("SLACK_BOT_TOKEN")
@@ -1403,10 +1430,9 @@ def main():
 
         # Post notification to Slack
         # For permission prompts, use interactive buttons (Block Kit cards)
-        is_permission_prompt = notification_type == "permission_prompt"
         success = post_to_slack(
-            slack_channel,
-            slack_thread_ts,
+            target_channel,
+            target_thread_ts,  # May be None for top-level messages
             enhanced_message,
             bot_token,
             add_number_reactions=False,  # Replaced by interactive buttons
