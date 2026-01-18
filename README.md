@@ -53,7 +53,7 @@ I've found VibeTunnel + Tailscale super helpful for using Claude Code on the go,
 
 ```bash
 # Clone this repository
-git clone https://github.com/anthropics/claude-slack.git ~/.claude/claude-slack
+git clone https://github.com/BRBCoffeeDebuff/claude-slack.git ~/.claude/claude-slack
 
 # Navigate to the directory
 cd ~/.claude/claude-slack
@@ -202,7 +202,7 @@ Then start Claude:
 cd /path/to/your/project
 
 # Start Claude with Slack integration (recommended: dedicated channel per project)
-claude-slack -c claude-myproject
+claude-slack -c channel-name
 
 # Or use thread mode in your default channel (no setup needed)
 claude-slack
