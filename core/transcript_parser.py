@@ -34,6 +34,26 @@ class TranscriptParser:
         self.messages: List[Dict[str, Any]] = []
 
     @staticmethod
+    def _get_message_content(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Safely extract content list from a message.
+
+        Handles cases where 'message' might be a string instead of dict.
+
+        Args:
+            msg: Message dict from transcript
+
+        Returns:
+            List of content blocks, or empty list if not available
+        """
+        message_data = msg.get('message', {})
+        if isinstance(message_data, dict):
+            content = message_data.get('content', [])
+            if isinstance(content, list):
+                return content
+        return []
+
+    @staticmethod
     def get_transcript_path_from_env() -> Optional[str]:
         """
         Get transcript path from environment variables (set by Claude Code hooks).
@@ -143,13 +163,15 @@ class TranscriptParser:
         # Get the last assistant message
         latest = assistant_messages[-1]
         message_data = latest.get('message', {})
-        content = message_data.get('content', [])
+        if not isinstance(message_data, dict):
+            message_data = {}
+        content = self._get_message_content(latest)
 
         # Extract text blocks
         text_blocks = [
             c.get('text', '')
             for c in content
-            if c.get('type') == 'text' and c.get('text', '').strip()
+            if isinstance(c, dict) and c.get('type') == 'text' and c.get('text', '').strip()
         ]
 
         # If text_only mode and no text, return None
@@ -209,9 +231,9 @@ class TranscriptParser:
 
         for msg in self.messages:
             if msg.get('type') == 'assistant':
-                content = msg.get('message', {}).get('content', [])
+                content = self._get_message_content(msg)
                 for c in content:
-                    if c.get('type') == 'tool_use':
+                    if isinstance(c, dict) and c.get('type') == 'tool_use':
                         tool_calls.append({
                             'name': c.get('name'),
                             'id': c.get('id'),
@@ -319,11 +341,11 @@ class TranscriptParser:
             timestamp = msg.get('timestamp', '')
 
             # Extract text content
-            content = msg.get('message', {}).get('content', [])
+            content = self._get_message_content(msg)
             text_parts = [
                 c.get('text', '')
                 for c in content
-                if c.get('type') == 'text'
+                if isinstance(c, dict) and c.get('type') == 'text'
             ]
             text = '\n'.join(text_parts).strip()
 
@@ -351,8 +373,8 @@ class TranscriptParser:
 
         # If last message is assistant with text, likely completed
         if last_msg.get('type') == 'assistant':
-            content = last_msg.get('message', {}).get('content', [])
-            has_text = any(c.get('type') == 'text' for c in content)
+            content = self._get_message_content(last_msg)
+            has_text = any(isinstance(c, dict) and c.get('type') == 'text' for c in content)
             if has_text:
                 return 'completed'
 
@@ -385,9 +407,14 @@ class TranscriptParser:
         initial_task = None
         if user_messages:
             first_user = user_messages[0]
-            content = first_user.get('message', {}).get('content', [])
+            message_data = first_user.get('message', {})
+            # Handle case where message might be a string instead of dict
+            if isinstance(message_data, dict):
+                content = message_data.get('content', [])
+            else:
+                content = []
             for c in content:
-                if c.get('type') == 'text':
+                if isinstance(c, dict) and c.get('type') == 'text':
                     initial_task = c.get('text', '')[:200]  # First 200 chars
                     if len(c.get('text', '')) > 200:
                         initial_task += '...'

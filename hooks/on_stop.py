@@ -748,9 +748,13 @@ def main():
 
         # Clean up any stale permission message before posting response
         # This handles the case where user responded via terminal (not Slack)
-        if session.get('permission_message_ts'):
-            debug_log("Found stale permission_message_ts, cleaning up...", "CLEANUP")
+        perm_ts = session.get('permission_message_ts')
+        debug_log(f"Checking for stale permission message: permission_message_ts={perm_ts}", "CLEANUP")
+        if perm_ts:
+            debug_log(f"Found stale permission_message_ts={perm_ts}, cleaning up...", "CLEANUP")
             cleanup_stale_permission_message(session, db, bot_token)
+        else:
+            debug_log("No permission_message_ts to clean up", "CLEANUP")
 
         # Post to Slack (response_thread_ts may be None for top-level)
         success = post_to_slack(slack_channel, response_thread_ts, response_text, bot_token)
@@ -786,7 +790,14 @@ def main():
         debug_log("Generating rich summary...", "SUMMARY")
         try:
             rich_summary = parser.get_rich_summary()
-            debug_log(f"Rich summary generated: complete={rich_summary.get('is_complete')}", "SUMMARY")
+            debug_log(f"Rich summary type: {type(rich_summary).__name__}", "SUMMARY")
+            if isinstance(rich_summary, dict):
+                debug_log(f"Rich summary keys: {list(rich_summary.keys())}", "SUMMARY")
+                debug_log(f"Rich summary generated: complete={rich_summary.get('is_complete')}", "SUMMARY")
+            else:
+                debug_log(f"WARNING: rich_summary is not a dict: {str(rich_summary)[:200]}", "SUMMARY")
+                # Skip posting if not a dict
+                raise TypeError(f"get_rich_summary returned {type(rich_summary).__name__}, expected dict")
 
             # Post summary to the session thread (not the reply_to thread)
             # This keeps the summary in the main conversation
@@ -802,6 +813,9 @@ def main():
         except Exception as e:
             log_error(f"Error generating/posting rich summary: {e}")
             debug_log(f"Summary error: {e}", "SUMMARY")
+            import traceback
+            tb = traceback.format_exc()
+            debug_log(f"Summary traceback:\n{tb}", "SUMMARY")
 
         # Handle session end - notify and cleanup DM subscriptions
         try:
