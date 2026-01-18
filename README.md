@@ -1,33 +1,76 @@
 # Claude-Slack Integration
 
-Slack integration for Claude Code sessions - enables bidirectional communication between Claude terminal sessions and Slack.  I've found vibetunnel + tailscale super helpful for using claude-code on the go, but have found the UI lacking.  Especially as sessions get longer, VT can get bogged down and difficult to use.  Slack has the benefits of notifying the user when claude-code finishes generating a response and also a much better UI for consuming and generating responses while on the go (STT especially!).  
+Slack integration for Claude Code sessions - enables bidirectional communication between Claude terminal sessions and Slack.
 
-## Overview
+I've found VibeTunnel + Tailscale super helpful for using Claude Code on the go, but the UI can be limiting. As sessions get longer, VT can get bogged down and difficult to use. Slack provides:
+- Push notifications when Claude finishes or needs input
+- Better UI for consuming and generating responses on mobile
+- Speech-to-text for hands-free interaction
+- Interactive buttons for permission approvals
 
-This integration allows Claude Code sessions to:
-- Send a claude-code session specific message to a slack channel to seed a new slack thread.
-- Receive,act on, and respond to messages added to the session specific thread
-- Support multiple concurrent Claude sessions across different projects (as separate slack threads)
-- Maintain conversation history and context
+## Features
+
+- **Bidirectional Communication**: Send messages from Slack to Claude and receive responses back
+- **Interactive Permission Buttons**: Approve/deny permissions with one tap
+- **Real-time Todo Updates**: See task progress as Claude works
+- **Rich Session Summaries**: Get completion status, modified files, and stats when sessions end
+- **Multiple Concurrent Sessions**: Each session gets its own Slack thread
+- **Custom Channel Mode**: Dedicated channels for specific projects
+- **Subagent Support**: Works with Claude's Task tool subagents
 
 ## Architecture
 
-This installation can serve all Claude projects on your machine:
-- Single installation at `~/.claude/claude-slack`
-- One Slack bot (socket mode enabled) serves all projects
-- Central session registry tracks active sessions
-- Hook templates are copied to each project that needs Slack integration
-- **WARNING**: This hasn't been tested for scenarios where on_stop and/or on_notification hooks already exist for your slack project.  They MIGHT OVERWRITE YOUR EXISTING HOOK FILES (SO BACK THEM UP IN ADVANCE), or more likely, you might need to manually copy the relevant content from the hook templates into your existing hooks if you have them. 
+```
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│   Slack App     │◄───►│  Slack Listener  │◄───►│  Claude Code    │
+│  (Socket Mode)  │     │  (Python daemon) │     │  (via wrapper)  │
+└─────────────────┘     └──────────────────┘     └─────────────────┘
+                               │
+                               ▼
+                        ┌──────────────────┐
+                        │ Session Registry │
+                        │    (SQLite)      │
+                        └──────────────────┘
+```
+
+**Key Components:**
+- **Slack Listener**: Receives messages/button clicks from Slack, routes to correct Claude session
+- **Claude Wrapper**: Wraps Claude Code, captures output, manages Unix sockets for input
+- **Session Registry**: SQLite database tracking active sessions, Slack threads, and routing info
+- **Hooks**: Claude Code hooks that post notifications, responses, and todo updates to Slack
 
 ## Quick Start
 
 ### 1. Prerequisites
 
-- Python 3.8+
+- Python 3.10+ (tested on 3.14)
 - Slack workspace with admin access to create apps
-- Claude Code installed
+- Claude Code CLI installed
 
-### 2. Create Slack App
+### 2. Install Dependencies
+
+```bash
+# Clone this repository
+git clone https://github.com/anthropics/claude-slack.git ~/.claude/claude-slack
+
+# Navigate to the directory
+cd ~/.claude/claude-slack
+
+# Create virtual environment (recommended)
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install Python packages
+pip install -r requirements.txt
+```
+
+**Required packages:**
+- `slack-bolt` - Slack SDK for bot interactions
+- `slack-sdk` - Slack API client
+- `sqlalchemy` - Database ORM for session registry
+- `python-dotenv` - Environment variable management
+
+### 3. Create Slack App
 
 1. Go to https://api.slack.com/apps and click "Create New App"
 2. Choose "From an app manifest"
@@ -49,6 +92,7 @@ oauth_config:
       - channels:history
       - channels:read
       - chat:write
+      - chat:write.public
       - reactions:read
       - reactions:write
       - users:read
@@ -56,6 +100,7 @@ oauth_config:
       - groups:read
       - im:history
       - im:read
+      - im:write
       - mpim:history
       - mpim:read
 settings:
@@ -68,7 +113,7 @@ settings:
       - message.mpim
       - reaction_added
   interactivity:
-    is_enabled: false
+    is_enabled: true
   org_deploy_enabled: false
   socket_mode_enabled: true
   token_rotation_enabled: false
@@ -82,232 +127,268 @@ settings:
 10. Name: "Socket Mode Token", add scope: `connections:write`
 11. Copy the token (starts with `xapp-`)
 
-### 3. Installation
+### 4. Configure Environment
 
 ```bash
-# Clone this repository
-git clone https://github.com/YOUR_USERNAME/claude-claude-slack.git ~/.claude/claude-slack
-
-# Navigate to the directory
-cd ~/.claude/claude-slack
-
 # Copy environment template
 cp .env.example .env
 
-# Edit .env with your tokens
-nano .env  # or use your preferred editor
+# Edit with your tokens
+nano .env
 ```
 
 Add your tokens to `.env`:
 ```bash
 SLACK_BOT_TOKEN=xoxb-your-bot-token-here
 SLACK_APP_TOKEN=xapp-your-app-token-here
-SLACK_CHANNEL=#your-channel-name
+SLACK_CHANNEL=#your-default-channel
 ```
 
-### 4. Add to PATH (optional but recommended)
+### 5. Add to PATH
 
 ```bash
+# For bash
+echo 'export PATH="$HOME/.claude/claude-slack/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+
+# For zsh
 echo 'export PATH="$HOME/.claude/claude-slack/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-### 5. Test the Installation
+### 6. Start the Listener
 
 ```bash
-# Start the Slack listener
+# Start the Slack listener (run in background or separate terminal)
 claude-slack-listener
 
-# In another terminal, test sending a message
-claude-slack-test
+# Or use the ensure script (starts if not running)
+claude-slack-ensure
 ```
 
-## Usage
-
-### Starting a New Claude Session with Slack
+### 7. Start a Claude Session
 
 ```bash
 # Navigate to your project
 cd /path/to/your/project
 
-# Initialize Slack integration for this project
+# Start Claude with Slack integration
 claude-slack
 
-# You should receive a new message in the slack channel you added to your .env file
-# You can reply 'as a thread' to the message to communicate with the claude session that sent the initial message
-# If your reply doesn't automatically get a green checkmark emoji applied to it, you need to @mention your claud bot to wake it back up and try your message again.
-# Claude code should receive your message as terminal input, generate it's response, and send it back to slack automatically.  You can continue the conversation as needed.
-
+# Or with a custom channel
+claude-slack -c mychannel
 ```
 
-### Custom Channel Mode
+## Usage
 
-You can run Claude sessions in a dedicated channel with top-level messages instead of threads:
-
-```bash
-# Start a session that posts to a specific channel (no threads)
-claude-slack --channel testchannel
-
-# Or use the short form
-claude-slack -c testchannel
-```
-
-**Custom channel mode features:**
-- Messages are posted as top-level messages (not in threads)
-- Useful for dedicated project channels or testing
-- Permission prompts appear with interactive buttons
-- Responses are routed back via channel-based lookup
-
-**Note:** Only one active session per custom channel is supported. Previous sessions are automatically cleaned up.
-
-### Permissions Channel
-
-You can send permission prompts to a separate channel:
+### Basic Usage
 
 ```bash
-# Send permission prompts to a different channel
+# Start session with default channel (from .env)
+claude-slack
+
+# Start with a specific message
+claude-slack --print "Help me refactor this code"
+
+# Start in a dedicated channel (top-level messages, no threads)
+claude-slack --channel projectname
+claude-slack -c projectname
+
+# Send permissions to a separate channel
 claude-slack --permissions-channel security-approvals
+```
+
+### Interacting via Slack
+
+1. **Thread Mode** (default): Claude creates a thread in your channel. Reply in the thread to send messages to Claude.
+
+2. **Custom Channel Mode** (`-c`): Messages are top-level in a dedicated channel. Just type in the channel.
+
+3. **Permission Prompts**: When Claude needs permission, you'll see interactive buttons:
+   - **Yes** - Approve this action
+   - **Yes, don't ask again** - Approve and remember for similar actions
+   - **No** - Deny and provide feedback
+
+4. **Quick Responses**: React with emoji for fast permission responses:
+   - 1️⃣ or 👍 = Approve
+   - 2️⃣ = Approve and remember
+   - 3️⃣ or 👎 = Deny
+
+### Session Management
+
+```bash
+# List active sessions
+claude-slack-sessions
+
+# Clean up stale sessions
+claude-slack-cleanup
+
+# Ensure listener is running
+claude-slack-ensure
 ```
 
 ## Available Commands
 
-After adding `~/.claude/claude-slack/bin` to your PATH:
+| Command | Description |
+|---------|-------------|
+| `claude-slack` | Start a new Claude session with Slack integration |
+| `claude-slack-listener` | Start the Slack listener daemon |
+| `claude-slack-ensure` | Ensure listener is running (start if not) |
+| `claude-slack-sessions` | List all active sessions |
+| `claude-slack-cleanup` | Clean up stale/inactive sessions |
+| `claude-slack-test` | Test Slack connection |
 
-- `claude-slack` - Initialize Slack for current project
-- `claude-slack-listener` - Start the Slack listener daemon
-- `claude-slack-test` - Test Slack connection
-- `claude-slack-ensure` - Ensure listener is running
-- `claude-slack-sessions` - List active sessions
-- `claude-slack-cleanup` - Clean up stale sessions
+## How It Works
+
+### Hooks
+
+This integration uses Claude Code hooks to communicate with Slack:
+
+| Hook | Purpose |
+|------|---------|
+| **Notification** (`on_notification.py`) | Posts permission prompts with interactive buttons |
+| **Stop** (`on_stop.py`) | Posts Claude's responses and session summaries |
+| **PostToolUse** (`on_posttooluse.py`) | Updates todo progress in real-time |
+
+### Session Flow
+
+1. `claude-slack` starts the wrapper which:
+   - Generates a unique session ID
+   - Creates a Unix socket for receiving Slack messages
+   - Registers the session in SQLite database
+   - Posts initial message to Slack
+   - Starts Claude Code with hooks configured
+
+2. When Claude needs permission:
+   - Notification hook captures the request
+   - Posts to Slack with interactive buttons
+   - User clicks button → Slack listener receives it
+   - Listener sends response to Claude via Unix socket
+
+3. When Claude responds:
+   - Stop hook captures the response
+   - Posts to the correct Slack thread
+   - Includes rich summary (if session complete)
 
 ## Troubleshooting
-
-### Quick Emoji Responses
-
-Permission prompts now show 1️⃣ 2️⃣ 3️⃣ emoji reactions - just tap to respond! Requires:
-- `reactions:read` scope (included in manifest above)
-- `reaction_added` event subscription (included in manifest above)
-
-### Socket Starvation Issue (FIXED)
-
-**Previous issue**: Messages sometimes not received, requiring @ mentions to "wake up" the listener.
-
-**Solution applied**:
-- Increased socket backlog from 1 to 128 connections
-- Added retry logic with exponential backoff
-- Added proper socket timeout handling
-
-If you still experience issues, ensure your Slack app has all the scopes and events from the manifest above.
 
 ### Checking Logs
 
 ```bash
-# Check listener logs
+# Slack listener logs
 tail -f ~/.claude/slack/logs/slack_listener.log
 
-# Check hook execution logs
+# Notification hook debug logs
 tail -f ~/.claude/slack/logs/notification_hook_debug.log
 
-# Check session registry
-sqlite3 ~/.claude/slack/registry.db "SELECT * FROM sessions;"
+# Wrapper logs (session-specific)
+tail -f ~/.claude/slack/logs/wrapper_*.log
+
+# Session registry
+sqlite3 ~/.claude/slack/registry.db "SELECT session_id, status, slack_channel FROM sessions;"
 ```
 
 ### Common Issues
 
-1. **No response from Claude**:
-   - Check if listener is running: `ps aux | grep slack_listener`
-   - Try @ mentioning the bot to wake it up
-   - Check logs for errors
+**Messages not being received:**
+```bash
+# Check if listener is running
+pgrep -f slack_listener.py
 
-2. **Duplicate messages**:
-   - Multiple listeners may be running
-   - Run `claude-slack-cleanup` to clean up
+# Restart listener
+pkill -f slack_listener.py
+claude-slack-listener
+```
 
-3. **Session not found**:
-   - Session may have expired (24 hour timeout)
-   - Check registry: `claude-slack-sessions`
+**Permission buttons not working:**
+- Ensure `interactivity.is_enabled: true` in your Slack app manifest
+- Check that the Slack app has been reinstalled after manifest changes
 
-4. **Permission denied**:
-   - Ensure scripts are executable: `chmod +x ~/.claude/claude-slack/bin/*`
+**Wrong number of permission options:**
+- The integration detects 2 vs 3 option prompts from terminal output
+- If detection fails, it defaults to safe 2-option (Yes/No)
+- Check `notification_hook_debug.log` for parsing details
+
+**Session not found errors:**
+```bash
+# Clean up stale sessions
+claude-slack-cleanup
+
+# Check registry for orphaned sessions
+sqlite3 ~/.claude/slack/registry.db "SELECT * FROM sessions WHERE status='active';"
+```
+
+**Subagent permissions not routing:**
+- Subagents use the same project_dir, so buffer lookup should work
+- Check that the main session is still active in the registry
 
 ## Project Structure
 
 ```
 ~/.claude/claude-slack/
-├── core/                 # Core Python modules
-│   ├── slack_listener.py      # Main Slack event listener
-│   ├── session_registry.py    # Session management
-│   ├── claude_wrapper_multi.py # Multi-session Claude wrapper
-│   ├── transcript_parser.py   # Parse Claude transcripts
-│   └── config.py              # Configuration management
-├── hooks/                # Claude Code hook templates
-│   ├── on_pretooluse.py      # Permission requests with full context (NEW!)
-│   ├── on_stop.py            # Response completion hook
-│   ├── on_notification.py    # User notification hook
-│   └── settings.local.json.template
-├── bin/                  # Executable scripts
-│   ├── claude-slack          # Project initialization
-│   ├── claude-slack-listener # Start listener daemon
-│   └── ...
-├── .env.example          # Environment template
-└── README.md            # This file
+├── core/                          # Core Python modules
+│   ├── slack_listener.py          # Slack event listener (buttons, messages)
+│   ├── claude_wrapper_hybrid.py   # Wraps Claude Code with I/O capture
+│   ├── session_registry.py        # High-level session management
+│   ├── registry_db.py             # SQLite database schema/operations
+│   ├── transcript_parser.py       # Parse Claude transcripts for summaries
+│   └── config.py                  # Centralized configuration
+├── .claude/
+│   ├── hooks/                     # Claude Code hook scripts
+│   │   ├── on_notification.py     # Permission prompts → Slack
+│   │   ├── on_stop.py             # Responses → Slack
+│   │   ├── on_posttooluse.py      # Todo updates → Slack
+│   │   └── on_pretooluse.py       # Pre-tool logging
+│   └── settings.local.json        # Hook configuration
+├── bin/                           # Executable scripts
+│   ├── claude-slack               # Main entry point
+│   ├── claude-slack-listener      # Start listener
+│   ├── claude-slack-ensure        # Ensure listener running
+│   ├── claude-slack-sessions      # List sessions
+│   ├── claude-slack-cleanup       # Clean up sessions
+│   └── claude-slack-test          # Test connection
+├── .env.example                   # Environment template
+├── requirements.txt               # Python dependencies
+└── README.md                      # This file
 ```
+
+## Data Storage
+
+All data is stored under `~/.claude/slack/`:
+
+| Path | Purpose |
+|------|---------|
+| `registry.db` | SQLite database of sessions |
+| `sockets/*.sock` | Unix sockets for IPC |
+| `logs/*.log` | Debug and error logs |
 
 ## Security
 
-- **NEVER** commit `.env` file to git
-- Slack tokens are sensitive - rotate immediately if exposed
-- Use `.gitignore` to exclude sensitive files
-- See SECURITY.md for detailed security practices
+- **Never commit `.env`** - Contains sensitive tokens
+- **Rotate tokens** immediately if exposed
+- **Use private channels** for sensitive projects
+- **Review permissions** before approving via Slack
+
+The `.gitignore` excludes sensitive files by default.
+
+## Known Limitations
+
+- One active session per custom channel
+- Buffer detection may fail for very fast parallel subagents
+- Slack message length limits may truncate very long responses
+- Session timeout is 24 hours (configurable in registry cleanup)
 
 ## Contributing
 
-Contributions are welcome! Please:
+Contributions welcome! Please:
 1. Fork the repository
 2. Create a feature branch
 3. Test thoroughly
 4. Submit a pull request
 
-## Hooks Explained
-
-This integration uses three Claude Code hooks:
-
-### 1. **PreToolUse Hook** (on_pretooluse.py) - NEW! ✨
-- **Fires:** Before Claude executes any tool (Bash, Write, Edit, Read, etc.)
-- **Purpose:** Sends detailed permission requests to Slack with FULL context
-- **What you see:**
-  - Actual bash commands before execution
-  - File paths being written/edited/read
-  - Search patterns and parameters
-  - Everything Claude wants to do, before it happens
-- **Why it's important:** Allows you to make informed security decisions remotely
-
-### 2. **Notification Hook** (on_notification.py)
-- **Fires:** When Claude sends generic notifications (idle prompts, auth messages)
-- **Purpose:** Keeps you informed about Claude's status
-- **Note:** This hook has limited context by design (generic alerts only)
-
-### 3. **Stop Hook** (on_stop.py)
-- **Fires:** When Claude finishes generating a response
-- **Purpose:** Sends complete responses to Slack thread
-- **What you see:** Full AI responses with code, explanations, and context
-
-## Known Limitations
-
-- ~~Socket starvation issue requires @ mention workaround~~ **FIXED!**
-- ~~Notifications from Claude aren't printing full content~~ **FIXED!**
-  - PreToolUse hook now provides complete context for all permission requests
-  - See actual bash commands, file contents, and tool parameters before approving
-
 ## License
 
 MIT License - see LICENSE file for details
-
-## Support
-
-- Report issues: [GitHub Issues](https://github.com/YOUR_USERNAME/claude-claude-slack/issues)
-- Slack API docs: https://api.slack.com
-- Claude Code docs: https://claude.ai
 
 ## Credits
 

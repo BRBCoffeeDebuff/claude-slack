@@ -198,6 +198,164 @@ class TranscriptParser:
             'session_id': self.messages[0].get('sessionId') if self.messages else None,
         }
 
+    def get_all_tool_calls(self) -> List[Dict[str, Any]]:
+        """
+        Get all tool calls from the conversation.
+
+        Returns:
+            List of tool call dicts with name, input, and result
+        """
+        tool_calls = []
+
+        for msg in self.messages:
+            if msg.get('type') == 'assistant':
+                content = msg.get('message', {}).get('content', [])
+                for c in content:
+                    if c.get('type') == 'tool_use':
+                        tool_calls.append({
+                            'name': c.get('name'),
+                            'id': c.get('id'),
+                            'input': c.get('input', {}),
+                            'timestamp': msg.get('timestamp')
+                        })
+            elif msg.get('type') == 'tool_result':
+                # Match result to tool call
+                tool_use_id = msg.get('tool_use_id')
+                for tc in tool_calls:
+                    if tc.get('id') == tool_use_id:
+                        tc['result'] = msg.get('content')
+                        tc['is_error'] = msg.get('is_error', False)
+                        break
+
+        return tool_calls
+
+    def get_todo_status(self) -> Optional[Dict[str, Any]]:
+        """
+        Get the latest todo list status from TodoWrite calls.
+
+        Returns:
+            Dict with todos list and counts, or None if no todos
+        """
+        tool_calls = self.get_all_tool_calls()
+
+        # Find the last TodoWrite call
+        todo_calls = [tc for tc in tool_calls if tc.get('name') == 'TodoWrite']
+
+        if not todo_calls:
+            return None
+
+        latest_todo = todo_calls[-1]
+        todos = latest_todo.get('input', {}).get('todos', [])
+
+        completed = [t for t in todos if t.get('status') == 'completed']
+        in_progress = [t for t in todos if t.get('status') == 'in_progress']
+        pending = [t for t in todos if t.get('status') == 'pending']
+
+        return {
+            'todos': todos,
+            'total': len(todos),
+            'completed': len(completed),
+            'in_progress': len(in_progress),
+            'pending': len(pending),
+            'completed_items': [t.get('content') for t in completed],
+            'in_progress_items': [t.get('content') for t in in_progress],
+            'pending_items': [t.get('content') for t in pending],
+            'is_complete': len(pending) == 0 and len(in_progress) == 0
+        }
+
+    def get_modified_files(self) -> List[str]:
+        """
+        Get list of files that were modified (via Edit or Write).
+
+        Returns:
+            List of unique file paths that were modified
+        """
+        tool_calls = self.get_all_tool_calls()
+
+        files = set()
+        for tc in tool_calls:
+            name = tc.get('name')
+            input_data = tc.get('input', {})
+
+            if name == 'Edit':
+                file_path = input_data.get('file_path')
+                if file_path:
+                    files.add(file_path)
+            elif name == 'Write':
+                file_path = input_data.get('file_path')
+                if file_path:
+                    files.add(file_path)
+
+        return sorted(list(files))
+
+    def get_stop_reason(self) -> str:
+        """
+        Determine the stop reason from the transcript.
+
+        Returns:
+            One of: 'completed', 'interrupted', 'error', 'unknown'
+        """
+        if not self.messages:
+            return 'unknown'
+
+        # Check last message for clues
+        last_msg = self.messages[-1]
+
+        # If last message is assistant with text, likely completed
+        if last_msg.get('type') == 'assistant':
+            content = last_msg.get('message', {}).get('content', [])
+            has_text = any(c.get('type') == 'text' for c in content)
+            if has_text:
+                return 'completed'
+
+        # If last message is tool_result with error, might be error
+        if last_msg.get('type') == 'tool_result' and last_msg.get('is_error'):
+            return 'error'
+
+        # Check if there are pending todos
+        todo_status = self.get_todo_status()
+        if todo_status and not todo_status.get('is_complete'):
+            return 'interrupted'
+
+        return 'completed'
+
+    def get_rich_summary(self) -> Dict[str, Any]:
+        """
+        Generate a rich summary of the session for Slack.
+
+        Returns:
+            Dict with all summary information
+        """
+        conv_summary = self.get_conversation_summary()
+        todo_status = self.get_todo_status()
+        modified_files = self.get_modified_files()
+        stop_reason = self.get_stop_reason()
+        latest_response = self.get_latest_assistant_response(text_only=False)
+
+        # Get first user message as "task"
+        user_messages = [m for m in self.messages if m.get('type') == 'user']
+        initial_task = None
+        if user_messages:
+            first_user = user_messages[0]
+            content = first_user.get('message', {}).get('content', [])
+            for c in content:
+                if c.get('type') == 'text':
+                    initial_task = c.get('text', '')[:200]  # First 200 chars
+                    if len(c.get('text', '')) > 200:
+                        initial_task += '...'
+                    break
+
+        return {
+            'stop_reason': stop_reason,
+            'is_complete': stop_reason == 'completed' and (not todo_status or todo_status.get('is_complete', True)),
+            'initial_task': initial_task,
+            'conversation': conv_summary,
+            'todos': todo_status,
+            'modified_files': modified_files,
+            'model': latest_response.get('model') if latest_response else None,
+            'usage': latest_response.get('usage') if latest_response else None,
+        }
+
 
 def main():
     """Main entry point for CLI usage."""

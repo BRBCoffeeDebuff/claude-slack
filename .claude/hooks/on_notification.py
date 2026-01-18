@@ -2,9 +2,10 @@
 """
 Claude Code Notification Hook - Post Notifications to Slack
 
-Version: 2.1.0
+Version: 2.2.0
 
 Changelog:
+- v2.2.0 (2026/01/17): Fixed 2-option vs 3-option detection for dangerous commands (pkill, rm -rf, sudo, etc.)
 - v2.1.0 (2025/11/18): Fixed early termination bug - continue posting remaining chunks on failure
 - v2.0.0 (2025/11/17): Added permission text mapping based on real prompts
 
@@ -60,7 +61,7 @@ from pathlib import Path
 from datetime import datetime
 
 # Hook version (for auto-updates)
-HOOK_VERSION = "2.1.0"
+HOOK_VERSION = "2.2.0"
 
 # Log directory - use ~/.claude/slack/logs as default
 LOG_DIR = os.environ.get("SLACK_LOG_DIR", os.path.expanduser("~/.claude/slack/logs"))
@@ -664,8 +665,9 @@ def determine_permission_context(tool_name, tool_input):
     if tool_name == "Bash":
         command = tool_input.get('command', '')
 
-        # Check for background process (& at end)
-        if re.search(r'&\s*$', command):
+        # Check for background process (& followed by space or end, but not &> or &&)
+        # Matches: "cmd &", "cmd & other", "2>&1 & cmd"
+        if re.search(r'(?<![>&])\s&\s', command) or re.search(r'(?<![>&])\s&$', command):
             debug_log(f"Detected background process: {command[:50]}", "PERMISSION")
             return ("bash_background_or_tmp", 2)
 
@@ -674,10 +676,25 @@ def determine_permission_context(tool_name, tool_input):
             debug_log(f"Detected /tmp operation: {command[:50]}", "PERMISSION")
             return ("bash_background_or_tmp", 2)
 
-        # Check for sudo commands
-        if re.search(r'\bsudo\b', command):
-            debug_log(f"Detected sudo command: {command[:50]}", "PERMISSION")
-            return ("bash_sudo", 3)
+        # Check for dangerous commands that often only get Yes/No (2 options)
+        # pkill, kill, rm -rf, etc. are risky enough that Claude may not offer "don't ask again"
+        dangerous_2_option_patterns = [
+            r'\bpkill\b',
+            r'\bkillall\b',
+            r'\bkill\s+-9\b',
+            r'\brm\s+-rf\b',
+            r'\brm\s+-r\b',
+            r'\bsudo\b',
+            r'\bchmod\s+777\b',
+            r'\bmkfs\b',
+            r'\bdd\s+if=',
+        ]
+        for pattern in dangerous_2_option_patterns:
+            if re.search(pattern, command):
+                debug_log(f"Detected dangerous command ({pattern}): {command[:50]}", "PERMISSION")
+                return ("bash_dangerous", 2)
+
+        # Note: sudo is already handled above as a dangerous 2-option command
 
         # Check for directory listing/access (ls, cd to out-of-scope)
         if re.search(r'\bls\b', command):
@@ -868,9 +885,54 @@ def enhance_notification_message(
 
             # FIRST: Try to get exact permission text from output buffer
             exact_options_from_buffer = None
-            buffer_file = os.path.join(LOG_DIR, f"claude_output_{session_id}.txt")
 
-            if os.path.exists(buffer_file):
+            # Find buffer file - try multiple strategies since session_id from hook
+            # may not match wrapper's buffer file name
+            buffer_file = None
+            import glob
+
+            # Strategy 1: Try exact session_id match first
+            exact_buffer = os.path.join(LOG_DIR, f"claude_output_{session_id}.txt")
+            if os.path.exists(exact_buffer):
+                buffer_file = exact_buffer
+                debug_log(f"Found buffer file by exact session_id: {buffer_file}", "ENHANCE")
+
+            # Strategy 2: Look up buffer_file_path from registry (most reliable)
+            if not buffer_file:
+                try:
+                    # First try by session_id
+                    session_record = db.get_session(session_id)
+                    if session_record and session_record.get('buffer_file_path'):
+                        if os.path.exists(session_record['buffer_file_path']):
+                            buffer_file = session_record['buffer_file_path']
+                            debug_log(f"Found buffer file from registry (session_id): {buffer_file}", "ENHANCE")
+
+                    # If not found, try by project_dir
+                    if not buffer_file and project_dir:
+                        wrapper_session = db.get_by_project_dir(project_dir, status='active')
+                        if wrapper_session and wrapper_session.get('buffer_file_path'):
+                            if os.path.exists(wrapper_session['buffer_file_path']):
+                                buffer_file = wrapper_session['buffer_file_path']
+                                debug_log(f"Found buffer file from registry (project_dir): {buffer_file}", "ENHANCE")
+                except Exception as e:
+                    debug_log(f"Error looking up buffer from registry: {e}", "ENHANCE")
+
+            # Strategy 3: Last resort - most recently modified (only if single instance likely)
+            if not buffer_file:
+                buffer_pattern = os.path.join(LOG_DIR, "claude_output_*.txt")
+                buffer_files = glob.glob(buffer_pattern)
+                if len(buffer_files) == 1:
+                    # Only one buffer file - safe to use
+                    buffer_file = buffer_files[0]
+                    debug_log(f"Found single buffer file: {buffer_file}", "ENHANCE")
+                elif buffer_files:
+                    # Multiple buffer files - risky, but try most recent
+                    buffer_file = max(buffer_files, key=os.path.getmtime)
+                    debug_log(f"WARNING: Multiple buffer files ({len(buffer_files)}), using most recent: {buffer_file}", "ENHANCE")
+                else:
+                    debug_log(f"No buffer files found matching {buffer_pattern}", "ENHANCE")
+
+            if buffer_file and os.path.exists(buffer_file):
                 try:
                     # RETRY LOOP: Buffer might not be ready yet, check multiple times
                     # 10 attempts × 0.2s = 2 seconds max wait (unnoticeable to user)
@@ -901,7 +963,7 @@ def enhance_notification_message(
                             time.sleep(retry_delay)
 
                     if not exact_options_from_buffer:
-                        debug_log("All buffer read attempts failed, falling back to hardcoded mapping", "ENHANCE")
+                        debug_log("All buffer read attempts failed, will use safe 2-option default", "ENHANCE")
 
                 except Exception as e:
                     debug_log(f"Error reading buffer: {e}", "ENHANCE")
@@ -953,50 +1015,45 @@ def enhance_notification_message(
                     if snippet:
                         enhanced += f"\n_Context: {snippet}..._\n"
 
-                # Add numbered response options with EXACT Claude wording
-                # Priority: Buffer options > Hardcoded mapping > Fallback
-                options_to_use = exact_options_from_buffer or exact_options
-
-                if options_to_use:
-                    if exact_options_from_buffer:
-                        debug_log(f"Using EXACT options from OUTPUT BUFFER ({len(options_to_use)} options)", "ENHANCE")
-                        # Clear buffer after successful extraction
-                        try:
+                # Add numbered response options
+                # Priority: Buffer options (exact count) > Safe 2-option default
+                # We NO LONGER fall back to hardcoded 3-option mapping because it's unreliable
+                if exact_options_from_buffer:
+                    options_to_use = exact_options_from_buffer
+                    debug_log(f"Using EXACT options from OUTPUT BUFFER ({len(options_to_use)} options)", "ENHANCE")
+                    # Clear buffer after successful extraction
+                    try:
+                        if buffer_file:
                             with open(buffer_file, 'wb') as f:
                                 pass  # Truncate file
                             debug_log("Output buffer cleared", "ENHANCE")
-                        except Exception as e:
-                            debug_log(f"Failed to clear buffer: {e}", "ENHANCE")
-                    else:
-                        debug_log(f"Using hardcoded mapping options ({len(options_to_use)} options)", "ENHANCE")
-
-                    # Store permission options for interactive buttons
-                    permission_options = options_to_use
-
-                    enhanced += "\n**Reply with:**\n"
-                    for i, option in enumerate(options_to_use, 1):
-                        enhanced += f"{i}. {option}\n"
+                    except Exception as e:
+                        debug_log(f"Failed to clear buffer: {e}", "ENHANCE")
                 else:
-                    debug_log("WARNING: No exact options found - using fallback", "ENHANCE")
-                    # This shouldn't happen since get_exact_permission_options has fallback
-                    permission_options = [
-                        "Approve this time",
-                        "Approve commands like this for this project",
-                        "Deny, tell Claude what to do instead"
+                    # SAFE DEFAULT: Always use 2 options (Yes/No) when we can't parse buffer
+                    # This prevents the bug where we show 3 options but Claude only has 2
+                    # Clicking "2" on a 2-option prompt means "No", not "Yes and remember"
+                    debug_log("Buffer parsing failed - using safe 2-option default (Yes/No)", "ENHANCE")
+                    options_to_use = [
+                        "Yes",
+                        "No, and tell Claude what to do differently"
                     ]
-                    enhanced += "\n**Reply with:**\n"
-                    enhanced += "1. Approve this time\n"
-                    enhanced += "2. Approve commands like this for this project\n"
-                    enhanced += "3. Deny, tell Claude what to do instead\n"
+
+                # Store permission options for interactive buttons
+                permission_options = options_to_use
+
+                enhanced += "\n**Reply with:**\n"
+                for i, option in enumerate(options_to_use, 1):
+                    enhanced += f"{i}. {option}\n"
             else:
                 # Fallback if retry parsing timed out or failed
-                debug_log("Retry parse FAILED/TIMEOUT - using simple fallback", "ENHANCE")
+                # Use safe 2-option default (Yes/No) since we can't determine actual option count
+                debug_log("Retry parse FAILED/TIMEOUT - using safe 2-option fallback", "ENHANCE")
                 permission_options = [
-                    "Approve this time",
-                    "Approve commands like this for this project",
-                    "Deny, tell Claude what to do instead"
+                    "Yes",
+                    "No, and tell Claude what to do differently"
                 ]
-                enhanced = f"⚠️ {message}\n\n**Reply with:**\n1. Approve this time\n2. Approve commands like this for this project\n3. Deny, tell Claude what to do instead"
+                enhanced = f"⚠️ {message}\n\n**Reply with:**\n1. Yes\n2. No, and tell Claude what to do differently"
 
         # For idle prompts, include context about what Claude last said
         elif notification_type == "idle_prompt" and os.path.exists(transcript_path):

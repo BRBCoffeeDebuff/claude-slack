@@ -913,6 +913,19 @@ class HybridPTYWrapper:
                 self.buffer_file = new_buffer_file
                 self.logger.info(f"Buffer file path updated to use Claude session ID: {claude_session_id[:8]}")
 
+                # Store buffer file path in registry for ALL sessions (wrapper + Claude)
+                # This allows hooks to find the buffer even if session IDs don't match
+                if self.registry and self.registry.available:
+                    try:
+                        # Update wrapper session
+                        self.registry.db.update_session(self.session_id, {'buffer_file_path': new_buffer_file})
+                        # Update Claude session if registered
+                        if hasattr(self, 'claude_session_uuid') and self.claude_session_uuid:
+                            self.registry.db.update_session(self.claude_session_uuid, {'buffer_file_path': new_buffer_file})
+                        self.logger.info(f"Stored buffer_file_path in registry: {new_buffer_file}")
+                    except Exception as e:
+                        self.logger.warning(f"Could not store buffer_file_path in registry: {e}")
+
             except Exception as e:
                 self.logger.error(f"Failed to update buffer file path: {e}")
 

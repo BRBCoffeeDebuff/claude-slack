@@ -383,6 +383,18 @@ def handle_message(event, say):
     if not text:
         return
 
+    # Ignore messages with @mentions - those are handled by app_mention handler
+    # This prevents duplicate processing when someone @mentions the bot
+    if "<@" in text and ">" in text:
+        # Check if it's a bot mention (not just any user mention)
+        try:
+            bot_user_id = app.client.auth_test()["user_id"]
+            if f"<@{bot_user_id}>" in text:
+                print(f"📝 Skipping message with bot mention (handled by app_mention)", file=sys.stderr)
+                return
+        except Exception:
+            pass  # If we can't check, let it through
+
     # Only process direct messages or messages in channels we're monitoring
     # This prevents responding to every message in every channel
     is_dm = channel_type == "im"
@@ -407,6 +419,40 @@ def handle_message(event, say):
 
     # Send response to Claude Code (registry socket, custom channel socket, legacy socket, or file)
     mode = send_response(text, thread_ts=thread_ts, channel=channel)
+
+    # Store the message ts so Claude's response can be threaded to it
+    message_ts = event.get("ts")
+    if message_ts and registry_db:
+        try:
+            # Find the session to update
+            session_id = None
+            if thread_ts:
+                # For threaded messages, find session by thread_ts
+                with registry_db.session_scope() as db_session:
+                    from registry_db import SessionRecord
+                    record = db_session.query(SessionRecord).filter_by(
+                        slack_thread_ts=thread_ts,
+                        status='active'
+                    ).first()
+                    if record:
+                        session_id = record.session_id
+            elif is_custom_channel and channel:
+                # For custom channel, find session by channel
+                with registry_db.session_scope() as db_session:
+                    from registry_db import SessionRecord
+                    record = db_session.query(SessionRecord).filter(
+                        SessionRecord.slack_channel == channel,
+                        SessionRecord.slack_thread_ts.is_(None),
+                        SessionRecord.status == 'active'
+                    ).first()
+                    if record:
+                        session_id = record.session_id
+
+            if session_id:
+                registry_db.update_session(session_id, {'reply_to_ts': message_ts})
+                print(f"📋 Set reply_to_ts={message_ts} for session {session_id[:8]}", file=sys.stderr)
+        except Exception as e:
+            print(f"⚠️  Could not set reply_to_ts: {e}", file=sys.stderr)
 
     # Acknowledge with reaction
     try:

@@ -42,6 +42,9 @@ class SessionRecord(Base):
     slack_channel = Column(String(50), nullable=True)    # Channel ID
     permissions_channel = Column(String(50), nullable=True)  # Separate channel for permissions
     slack_user_id = Column(String(50), nullable=True)    # User ID who initiated session
+    reply_to_ts = Column(String(50), nullable=True)      # Message ts to thread responses to
+    todo_message_ts = Column(String(50), nullable=True)  # Message ts for live todo updates
+    buffer_file_path = Column(String(512), nullable=True)  # Path to terminal output buffer file
 
     # Status tracking
     status = Column(String(20), nullable=False, default='active')  # active/idle/terminated
@@ -68,6 +71,9 @@ class SessionRecord(Base):
             'channel': self.slack_channel,
             'permissions_channel': self.permissions_channel,
             'slack_user_id': self.slack_user_id,
+            'reply_to_ts': self.reply_to_ts,
+            'todo_message_ts': self.todo_message_ts,
+            'buffer_file_path': self.buffer_file_path,
             'status': self.status,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'last_activity': self.last_activity.isoformat() if self.last_activity else None,
@@ -140,6 +146,24 @@ class RegistryDatabase:
                 conn.execute(text("ALTER TABLE sessions ADD COLUMN permissions_channel VARCHAR(50)"))
                 conn.commit()
 
+            # Add reply_to_ts column if not exists (for threading responses)
+            if 'reply_to_ts' not in columns:
+                print(f"[Migration] Adding reply_to_ts column to sessions table", flush=True)
+                conn.execute(text("ALTER TABLE sessions ADD COLUMN reply_to_ts VARCHAR(50)"))
+                conn.commit()
+
+            # Add todo_message_ts column if not exists (for live todo updates)
+            if 'todo_message_ts' not in columns:
+                print(f"[Migration] Adding todo_message_ts column to sessions table", flush=True)
+                conn.execute(text("ALTER TABLE sessions ADD COLUMN todo_message_ts VARCHAR(50)"))
+                conn.commit()
+
+            # Add buffer_file_path column if not exists (for terminal output buffer lookup)
+            if 'buffer_file_path' not in columns:
+                print(f"[Migration] Adding buffer_file_path column to sessions table", flush=True)
+                conn.execute(text("ALTER TABLE sessions ADD COLUMN buffer_file_path VARCHAR(512)"))
+                conn.commit()
+
     @contextmanager
     def session_scope(self):
         """
@@ -205,7 +229,7 @@ class RegistryDatabase:
 
             # Update allowed fields
             for key, value in updates.items():
-                if key in ('slack_thread_ts', 'slack_channel', 'permissions_channel', 'slack_user_id', 'status', 'last_activity', 'project_dir'):
+                if key in ('slack_thread_ts', 'slack_channel', 'permissions_channel', 'slack_user_id', 'status', 'last_activity', 'project_dir', 'reply_to_ts', 'todo_message_ts', 'buffer_file_path'):
                     setattr(record, key, value)
 
             # Always update last_activity on any update
