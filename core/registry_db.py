@@ -212,6 +212,9 @@ class RegistryDatabase:
                 slack_channel=session_data.get('channel'),
                 permissions_channel=session_data.get('permissions_channel'),
                 slack_user_id=session_data.get('slack_user_id'),
+                buffer_file_path=session_data.get('buffer_file_path'),
+                reply_to_ts=session_data.get('reply_to_ts'),
+                todo_message_ts=session_data.get('todo_message_ts'),
                 status='active',
                 created_at=datetime.now(),
                 last_activity=datetime.now()
@@ -232,8 +235,9 @@ class RegistryDatabase:
                 if key in ('slack_thread_ts', 'slack_channel', 'permissions_channel', 'slack_user_id', 'status', 'last_activity', 'project_dir', 'reply_to_ts', 'todo_message_ts', 'buffer_file_path'):
                     setattr(record, key, value)
 
-            # Always update last_activity on any update
-            record.last_activity = datetime.now()
+            # Auto-update last_activity only if not explicitly provided
+            if 'last_activity' not in updates:
+                record.last_activity = datetime.now()
             return True
 
     def delete_session(self, session_id: str) -> bool:

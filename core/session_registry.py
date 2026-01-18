@@ -128,6 +128,10 @@ class SessionRegistry:
         self.socket_path = socket_path
         self.slack_channel = slack_channel
 
+        # Create directories BEFORE initializing database
+        self.registry_dir.mkdir(parents=True, exist_ok=True)
+        Path(socket_path).parent.mkdir(parents=True, exist_ok=True)
+
         # Database backend (replaces JSON file + manual locking)
         db_path = self.registry_dir / "registry.db"
         self.db = RegistryDatabase(str(db_path))
@@ -150,10 +154,6 @@ class SessionRegistry:
         self.server_socket = None
         self.server_thread = None
         self.running = False
-
-        # Create directories
-        self.registry_dir.mkdir(parents=True, exist_ok=True)
-        Path(socket_path).parent.mkdir(parents=True, exist_ok=True)
 
         self._initialized = True
 
@@ -675,6 +675,172 @@ class SessionRegistry:
     # Slack Integration
     # ========================================
 
+    def _ensure_channel_exists(self, channel_name: str) -> str:
+        """
+        Ensure a Slack channel exists, creating it if necessary.
+
+        Args:
+            channel_name: Channel name (without # prefix)
+
+        Returns:
+            Channel ID (e.g., "C0123456789")
+
+        Raises:
+            RuntimeError: If channel creation fails
+        """
+        if not self.slack_client:
+            raise RuntimeError("Slack client not initialized")
+
+        # Normalize channel name (strip # prefix, lowercase, replace spaces with hyphens)
+        channel_name = channel_name.lstrip('#').lower().replace(' ', '-')
+
+        self._log(f"Ensuring channel exists: {channel_name}")
+
+        try:
+            # First, try to find existing channel by name
+            # Use conversations.list to search for the channel
+            cursor = None
+            max_pages = 50  # Safety limit to prevent infinite loops
+            page_count = 0
+
+            while page_count < max_pages:
+                page_count += 1
+
+                if cursor:
+                    response = self.slack_client.conversations_list(
+                        types="public_channel,private_channel",
+                        limit=200,
+                        cursor=cursor
+                    )
+                else:
+                    response = self.slack_client.conversations_list(
+                        types="public_channel,private_channel",
+                        limit=200
+                    )
+
+                # Validate response is dict-like (SlackResponse is not a dict but has .get())
+                # Check for dict-like interface rather than strict isinstance(response, dict)
+                if not hasattr(response, 'get') or not callable(getattr(response, 'get', None)):
+                    self._log(f"Warning: Unexpected response type from conversations_list: {type(response)}")
+                    break
+
+                channels = response.get('channels', [])
+                if not isinstance(channels, list):
+                    self._log(f"Warning: Unexpected channels type: {type(channels)}")
+                    break
+
+                for channel in channels:
+                    if not isinstance(channel, dict):
+                        continue
+                    if channel.get('name') == channel_name:
+                        channel_id = channel.get('id')
+                        if not channel_id:
+                            continue
+                        self._log(f"Found existing channel: {channel_name} ({channel_id})")
+
+                        # Ensure bot is a member
+                        if not channel.get('is_member', False):
+                            try:
+                                self.slack_client.conversations_join(channel=channel_id)
+                                self._log(f"Joined channel: {channel_name}")
+                            except Exception as e:
+                                self._log(f"Warning: Could not join channel {channel_name}: {e}")
+
+                        return channel_id
+
+                # Check for pagination - must be a non-empty string
+                response_metadata = response.get('response_metadata')
+                if response_metadata and hasattr(response_metadata, 'get'):
+                    next_cursor = response_metadata.get('next_cursor')
+                    if isinstance(next_cursor, str) and next_cursor:
+                        cursor = next_cursor
+                        continue
+
+                # No more pages
+                break
+
+            if page_count >= max_pages:
+                self._log(f"Warning: Hit pagination limit ({max_pages} pages) searching for channel {channel_name}")
+
+            # Channel doesn't exist, create it
+            self._log(f"Channel {channel_name} not found, creating it...")
+            create_response = self.slack_client.conversations_create(
+                name=channel_name,
+                is_private=False
+            )
+
+            channel_id = create_response['channel']['id']
+            self._log(f"Created new channel: {channel_name} ({channel_id})")
+
+            # Post notification in default channel about the new channel
+            try:
+                self.slack_client.chat_postMessage(
+                    channel=self.slack_channel,
+                    text=f"📢 New Claude session channel created: <#{channel_id}|{channel_name}>",
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"📢 *New Claude session channel created*\n\nClick to join: <#{channel_id}|{channel_name}>"
+                            }
+                        }
+                    ]
+                )
+                self._log(f"Posted notification about new channel to {self.slack_channel}")
+            except Exception as notify_err:
+                self._log(f"Warning: Could not post notification: {notify_err}")
+
+            return channel_id
+
+        except Exception as e:
+            error_msg = str(e).lower()
+            # Handle specific error cases with helpful messages
+            if 'name_taken' in error_msg:
+                # Channel exists but we couldn't find it (maybe private or archived)
+                self._log(f"Channel {channel_name} exists but not visible, trying to join...")
+                try:
+                    join_response = self.slack_client.conversations_join(channel=channel_name)
+                    return join_response['channel']['id']
+                except Exception as join_error:
+                    raise RuntimeError(
+                        f"Channel '{channel_name}' exists but bot cannot join it. "
+                        f"Either invite the bot manually (/invite @Claude Code Bot) or "
+                        f"ensure the bot has 'channels:join' scope."
+                    )
+            elif 'missing_scope' in error_msg or 'not_allowed' in error_msg:
+                # Determine which scope is missing based on context
+                if 'conversations.create' in error_msg or 'channels:manage' in error_msg:
+                    raise RuntimeError(
+                        f"Cannot auto-create channel '{channel_name}'. "
+                        f"Add 'channels:manage' scope to your Slack app, or create the channel manually "
+                        f"and invite the bot with: /invite @Claude Code Bot"
+                    )
+                elif 'conversations.join' in error_msg or 'channels:join' in error_msg:
+                    raise RuntimeError(
+                        f"Cannot auto-join channel '{channel_name}'. "
+                        f"Add 'channels:join' scope to your Slack app, or invite the bot manually: "
+                        f"/invite @Claude Code Bot"
+                    )
+                else:
+                    raise RuntimeError(
+                        f"Missing Slack permission for channel '{channel_name}'. "
+                        f"Check your Slack app scopes or create/join the channel manually. "
+                        f"Error: {e}"
+                    )
+            elif 'channel_not_found' in error_msg:
+                raise RuntimeError(
+                    f"Channel '{channel_name}' not found and cannot be created. "
+                    f"Either add 'channels:manage' scope to auto-create, or create the channel manually."
+                )
+            elif 'invalid_name' in error_msg:
+                raise RuntimeError(
+                    f"Invalid channel name '{channel_name}'. "
+                    f"Channel names must be lowercase, max 80 chars, using only letters, numbers, hyphens, and underscores."
+                )
+            else:
+                raise RuntimeError(f"Failed to setup channel '{channel_name}': {e}")
+
     def _create_slack_thread(self, session_data: Dict[str, Any]) -> Dict[str, str]:
         """
         Create Slack thread for new session (simplified for hooks-based system)
@@ -709,13 +875,30 @@ class SessionRegistry:
         if permissions_channel:
             self._log(f"Permissions channel: {permissions_channel}")
 
+        # Ensure channels exist (creates if needed, joins if not a member)
+        try:
+            target_channel_id = self._ensure_channel_exists(target_channel)
+            self._log(f"Target channel ID: {target_channel_id}")
+        except Exception as e:
+            self._log(f"Warning: Could not ensure channel exists: {e}")
+            # Fall back to using channel name (will fail if channel doesn't exist)
+            target_channel_id = target_channel
+
+        if permissions_channel:
+            try:
+                permissions_channel_id = self._ensure_channel_exists(permissions_channel)
+                self._log(f"Permissions channel ID: {permissions_channel_id}")
+                permissions_channel = permissions_channel_id
+            except Exception as e:
+                self._log(f"Warning: Could not ensure permissions channel exists: {e}")
+
         # For custom channels, use top-level messages (no parent thread)
         if custom_channel:
             self._log(f"Custom channel mode: using top-level messages (no thread)")
             # Just return the channel info, no thread_ts
             return {
                 "slack_thread_ts": None,  # No threading for custom channels
-                "slack_channel": target_channel,
+                "slack_channel": target_channel_id,
                 "permissions_channel": permissions_channel
             }
 
@@ -764,7 +947,7 @@ class SessionRegistry:
             text_fallback += f" - {description}"
 
         response = self.slack_client.chat_postMessage(
-            channel=target_channel,
+            channel=target_channel_id,
             text=text_fallback,
             blocks=blocks
         )

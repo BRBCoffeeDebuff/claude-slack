@@ -602,9 +602,9 @@ def extract_target_from_command(tool_name, tool_input):
                     # Return just the last directory component
                     return os.path.basename(path)
 
-        # Extract command from sudo
+        # Extract command from sudo (handles hyphenated commands like apt-get)
         if 'sudo' in command:
-            match = re.search(r'sudo\s+(\w+)', command)
+            match = re.search(r'sudo\s+([\w-]+)', command)
             if match:
                 return f"sudo {match.group(1)}"
 

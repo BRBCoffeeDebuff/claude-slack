@@ -1,0 +1,95 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-debian:
+    name: Test on Debian
+    runs-on: ubuntu-latest
+    container: debian:bookworm-slim
+
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y python3 python3-pip python3-venv git
+
+      - uses: actions/checkout@v4
+
+      - name: Set up Python environment
+        run: |
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run tests
+        run: |
+          . .venv/bin/activate
+          export PYTHONPATH="${PYTHONPATH}:$(pwd)/core"
+          pytest tests/ -v --tb=short
+
+  test-fedora:
+    name: Test on Fedora
+    runs-on: ubuntu-latest
+    container: fedora:40
+
+    steps:
+      - name: Install dependencies
+        run: |
+          dnf install -y python3 python3-pip git
+
+      - uses: actions/checkout@v4
+
+      - name: Set up Python environment
+        run: |
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run tests
+        run: |
+          . .venv/bin/activate
+          export PYTHONPATH="${PYTHONPATH}:$(pwd)/core"
+          pytest tests/ -v --tb=short
+
+  test-ubuntu:
+    name: Test on Ubuntu
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run tests
+        run: |
+          export PYTHONPATH="${PYTHONPATH}:$(pwd)/core"
+          pytest tests/ -v --tb=short
+
+      - name: Run tests with coverage
+        if: matrix.python-version == '3.11'
+        run: |
+          export PYTHONPATH="${PYTHONPATH}:$(pwd)/core"
+          pytest tests/ --cov=core --cov-report=xml --cov-report=term
+
+      - name: Upload coverage
+        if: matrix.python-version == '3.11'
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
