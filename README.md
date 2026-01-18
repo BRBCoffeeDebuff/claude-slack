@@ -158,6 +158,7 @@ source ~/.zshrc
 
 ### 6. Start the Listener
 
+**Option A: Manual (foreground)**
 ```bash
 # Start the Slack listener (run in background or separate terminal)
 claude-slack-listener
@@ -165,6 +166,26 @@ claude-slack-listener
 # Or use the ensure script (starts if not running)
 claude-slack-ensure
 ```
+
+**Option B: Systemd Service (recommended for 24/7)**
+```bash
+# Install and start the service
+claude-slack-service install
+claude-slack-service start
+
+# Other commands
+claude-slack-service status   # Check status
+claude-slack-service logs     # View logs (follow mode)
+claude-slack-service restart  # Restart service
+claude-slack-service stop     # Stop service
+claude-slack-service uninstall # Remove service
+```
+
+The systemd service:
+- Auto-starts on login
+- Auto-restarts on crash or disconnect
+- Survives machine sleep/wake cycles
+- Runs with security hardening (read-only filesystem, no privilege escalation)
 
 ### 7. Start a Claude Session
 
@@ -232,7 +253,8 @@ claude-slack-ensure
 | Command | Description |
 |---------|-------------|
 | `claude-slack` | Start a new Claude session with Slack integration |
-| `claude-slack-listener` | Start the Slack listener daemon |
+| `claude-slack-listener` | Start the Slack listener daemon (foreground) |
+| `claude-slack-service` | Manage systemd service (install/start/stop/status/logs) |
 | `claude-slack-ensure` | Ensure listener is running (start if not) |
 | `claude-slack-sessions` | List all active sessions |
 | `claude-slack-cleanup` | Clean up stale/inactive sessions |
