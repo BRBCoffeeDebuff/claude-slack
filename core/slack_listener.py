@@ -76,12 +76,23 @@ except Exception as e:
     print(f"   Falling back to hard-coded socket path", file=sys.stderr)
 
 # Initialize Slack app
+# Note: We defer the sys.exit() to main() so that tests can import this module
+# without requiring SLACK_BOT_TOKEN to be set
+_slack_app_error = None
 try:
     app = App(token=os.environ["SLACK_BOT_TOKEN"])
 except KeyError:
-    print("❌ Error: SLACK_BOT_TOKEN environment variable not set", file=sys.stderr)
-    print("   Create a .env file from .env.example and set your tokens", file=sys.stderr)
-    sys.exit(1)
+    _slack_app_error = "SLACK_BOT_TOKEN environment variable not set"
+    # Create a dummy app for testing - decorators will work but do nothing
+    class _DummyApp:
+        """Dummy App class that accepts decorators but does nothing."""
+        def event(self, *args, **kwargs):
+            return lambda f: f
+        def action(self, *args, **kwargs):
+            return lambda f: f
+        def message(self, *args, **kwargs):
+            return lambda f: f
+    app = _DummyApp()
 
 
 def get_socket_for_thread(thread_ts):
@@ -764,6 +775,12 @@ def handle_permission_button(ack, body, client):
 
 def main():
     """Start the Slack bot in Socket Mode"""
+    # Check if app initialization failed (deferred from module load)
+    if _slack_app_error:
+        print(f"❌ Error: {_slack_app_error}", file=sys.stderr)
+        print("   Create a .env file from .env.example and set your tokens", file=sys.stderr)
+        sys.exit(1)
+
     print("🚀 Starting Slack bot...")
     print(f"📁 Response file (fallback): {RESPONSE_FILE}")
     print(f"🔌 Legacy socket path: {SOCKET_PATH}")
