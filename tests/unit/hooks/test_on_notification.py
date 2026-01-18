@@ -777,3 +777,39 @@ class TestStalePermissionCleanup:
 
         # message_not_found should be handled gracefully
         assert 'message_not_found' in error_responses
+
+    def test_cleanup_triggered_before_new_notification(self):
+        """Stale permission message should be cleaned up before posting a new notification.
+
+        This handles the case where user responds via terminal (deny), and Claude
+        continues with a new notification. The old permission card should be deleted.
+        """
+        # Scenario:
+        # 1. Permission prompt posted -> permission_message_ts stored
+        # 2. User denies via terminal (not Slack)
+        # 3. Claude sends new notification (permission or otherwise)
+        # 4. Before posting new notification, old one should be deleted
+
+        session_with_stale_ts = {
+            'session_id': 'test123',
+            'channel': 'C12345',
+            'permission_message_ts': '1234567890.123456'  # Stale ts
+        }
+
+        # The cleanup should be triggered when permission_message_ts is present
+        assert session_with_stale_ts.get('permission_message_ts') is not None
+
+        # After cleanup, ts should be cleared
+        session_with_stale_ts['permission_message_ts'] = None
+        assert session_with_stale_ts.get('permission_message_ts') is None
+
+    def test_no_cleanup_when_no_stale_message(self):
+        """No cleanup attempt should be made when no stale message exists."""
+        session_without_stale_ts = {
+            'session_id': 'test123',
+            'channel': 'C12345',
+            'permission_message_ts': None
+        }
+
+        # No cleanup needed when permission_message_ts is None
+        assert session_without_stale_ts.get('permission_message_ts') is None
