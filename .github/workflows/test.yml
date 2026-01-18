@@ -11,6 +11,9 @@ jobs:
     name: Test on Debian
     runs-on: ubuntu-latest
     container: debian:bookworm-slim
+    env:
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SLACK_APP_TOKEN: ${{ secrets.SLACK_APP_TOKEN }}
 
     steps:
       - name: Install dependencies
@@ -36,6 +39,9 @@ jobs:
     name: Test on Fedora
     runs-on: ubuntu-latest
     container: fedora:40
+    env:
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SLACK_APP_TOKEN: ${{ secrets.SLACK_APP_TOKEN }}
 
     steps:
       - name: Install dependencies
@@ -59,6 +65,9 @@ jobs:
   test-ubuntu:
     name: Test on Ubuntu
     runs-on: ubuntu-latest
+    env:
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SLACK_APP_TOKEN: ${{ secrets.SLACK_APP_TOKEN }}
 
     strategy:
       matrix:
