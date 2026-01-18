@@ -876,13 +876,13 @@ class SessionRegistry:
             self._log(f"Permissions channel: {permissions_channel}")
 
         # Ensure channels exist (creates if needed, joins if not a member)
+        # Channel ID is required - channel names won't work with Slack API
         try:
             target_channel_id = self._ensure_channel_exists(target_channel)
             self._log(f"Target channel ID: {target_channel_id}")
         except Exception as e:
-            self._log(f"Warning: Could not ensure channel exists: {e}")
-            # Fall back to using channel name (will fail if channel doesn't exist)
-            target_channel_id = target_channel
+            self._log(f"Error: Could not resolve channel '{target_channel}' to ID: {e}")
+            raise RuntimeError(f"Could not resolve channel '{target_channel}' to ID: {e}")
 
         if permissions_channel:
             try:
@@ -890,7 +890,8 @@ class SessionRegistry:
                 self._log(f"Permissions channel ID: {permissions_channel_id}")
                 permissions_channel = permissions_channel_id
             except Exception as e:
-                self._log(f"Warning: Could not ensure permissions channel exists: {e}")
+                self._log(f"Error: Could not resolve permissions channel '{permissions_channel}' to ID: {e}")
+                raise RuntimeError(f"Could not resolve permissions channel '{permissions_channel}' to ID: {e}")
 
         # For custom channels, use top-level messages (no parent thread)
         if custom_channel:

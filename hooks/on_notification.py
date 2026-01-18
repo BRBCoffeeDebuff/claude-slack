@@ -1495,6 +1495,13 @@ def main():
             target_thread_ts = slack_thread_ts
             debug_log(f"Using main channel: {target_channel}, thread_ts: {target_thread_ts}", "SLACK")
 
+        # Validate channel ID format - Slack channel IDs start with 'C' or 'G' (for private channels)
+        if target_channel and not target_channel.startswith(('C', 'G', 'D')):
+            log_error(f"Invalid channel format: '{target_channel}' looks like a name, not an ID. Channel IDs start with 'C', 'G', or 'D'.")
+            debug_log(f"Channel validation failed: '{target_channel}' is not a valid channel ID", "SLACK")
+            log_error("This session may need to be re-registered with a valid channel. Try restarting the claude-slack wrapper.")
+            sys.exit(0)
+
         # SELF-HEALING: If session exists but Slack channel is missing
         # Note: thread_ts can be None for custom channel mode (top-level messages)
         if not target_channel:
