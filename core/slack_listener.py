@@ -224,6 +224,65 @@ def get_socket_for_channel(channel):
         return None
 
 
+def handle_dm_message(text: str, user_id: str, dm_channel_id: str, db, slack_client, say) -> bool:
+    """
+    Handle DM commands (/sessions, /attach, /detach).
+
+    Args:
+        text: Message text from Slack
+        user_id: Slack user ID
+        dm_channel_id: DM channel ID
+        db: RegistryDatabase instance
+        slack_client: Slack WebClient instance
+        say: Function to send message back to user
+
+    Returns:
+        True if command was handled, False if not a DM command
+    """
+    try:
+        from dm_mode import (
+            parse_dm_command,
+            format_session_list_for_slack,
+            attach_to_session,
+            detach_from_session
+        )
+    except ImportError:
+        return False
+
+    # Parse the command
+    command = parse_dm_command(text)
+    if command is None:
+        return False
+
+    # Handle each command type
+    if command.command == 'sessions':
+        message = format_session_list_for_slack(db)
+        say(text=message)
+        return True
+
+    elif command.command == 'attach':
+        session_id = command.args.get('session_id')
+        history_count = command.args.get('history_count', 0)
+        result = attach_to_session(
+            db, user_id, session_id, dm_channel_id,
+            slack_client, history_count
+        )
+        say(text=result['message'])
+        return True
+
+    elif command.command == 'detach':
+        result = detach_from_session(db, user_id, slack_client, dm_channel_id)
+        say(text=result['message'])
+        return True
+
+    elif command.command == 'error':
+        # Error from parse_dm_command (e.g., missing session ID)
+        say(text=f"❌ {command.args.get('message', 'Invalid command')}")
+        return True
+
+    return False
+
+
 def send_response(text, thread_ts=None, channel=None):
     """
     Send response to Claude Code
@@ -382,6 +441,11 @@ def handle_message(event, say):
 
     if not text:
         return
+
+    # Check if this is a DM channel and try to handle as DM command
+    if channel_type == 'im':
+        if handle_dm_message(text, user, channel, registry_db, app.client, say):
+            return  # DM command handled, don't process further
 
     # Ignore messages with @mentions - those are handled by app_mention handler
     # This prevents duplicate processing when someone @mentions the bot

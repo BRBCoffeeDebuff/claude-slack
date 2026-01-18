@@ -1504,6 +1504,18 @@ def main():
             log_info("Failed to post to Slack (see errors above)")
             debug_log("Slack post failed", "SLACK")
 
+        # Forward notification to DM subscribers
+        try:
+            from dm_mode import forward_to_dm_subscribers
+            from slack_sdk import WebClient
+            dm_client = WebClient(token=bot_token)
+            forward_to_dm_subscribers(db, session_id, enhanced_message, dm_client)
+            debug_log("Forwarded notification to DM subscribers", "DM")
+        except ImportError:
+            debug_log("dm_mode not available, skipping DM forwarding", "DM")
+        except Exception as e:
+            debug_log(f"Error forwarding notification to DM: {e}", "DM")
+
     except Exception as e:
         # Catch-all error handler
         log_error(f"Unexpected error in hook: {e}")

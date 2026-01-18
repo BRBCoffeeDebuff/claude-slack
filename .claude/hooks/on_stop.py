@@ -694,6 +694,18 @@ def main():
             log_info("Failed to post response to Slack (see errors above)")
             debug_log("Slack response post failed", "SLACK")
 
+        # Forward full response to DM subscribers
+        try:
+            from dm_mode import forward_to_dm_subscribers
+            from slack_sdk import WebClient
+            dm_client = WebClient(token=bot_token)
+            forward_to_dm_subscribers(db, session_id, response_text, dm_client)
+            debug_log("Forwarded response to DM subscribers", "DM")
+        except ImportError:
+            debug_log("dm_mode not available, skipping DM forwarding", "DM")
+        except Exception as e:
+            debug_log(f"Error forwarding to DM: {e}", "DM")
+
         # Generate and post rich summary
         debug_log("Generating rich summary...", "SUMMARY")
         try:
@@ -714,6 +726,18 @@ def main():
         except Exception as e:
             log_error(f"Error generating/posting rich summary: {e}")
             debug_log(f"Summary error: {e}", "SUMMARY")
+
+        # Handle session end - notify and cleanup DM subscriptions
+        try:
+            from dm_mode import handle_session_end
+            from slack_sdk import WebClient
+            dm_client = WebClient(token=bot_token)
+            handle_session_end(db, session_id, dm_client)
+            debug_log("Notified DM subscribers of session end", "DM")
+        except ImportError:
+            debug_log("dm_mode not available, skipping session end cleanup", "DM")
+        except Exception as e:
+            debug_log(f"Error handling session end for DM: {e}", "DM")
 
     except Exception as e:
         # Catch-all error handler
