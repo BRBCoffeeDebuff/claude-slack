@@ -2,10 +2,12 @@
 """
 Claude Code Notification Hook - Post Notifications to Slack
 
-Version: 2.2.0
+Version: 2.4.0
 
 Changelog:
-- v2.2.0 (2026/01/17): Fixed 2-option vs 3-option detection for dangerous commands (pkill, rm -rf, sudo, etc.)
+- v2.4.0 (2026/01/18): SAFETY FIX - No emoji reactions when buffer parsing fails (prevents option mismatch)
+- v2.3.0 (2026/01/18): Clean up stale permission messages before posting new notifications
+- v2.2.0 (2026/01/17): Added custom channel mode support (top-level messages, no threads)
 - v2.1.0 (2025/11/18): Fixed early termination bug - continue posting remaining chunks on failure
 - v2.0.0 (2025/11/17): Added permission text mapping based on real prompts
 
@@ -61,7 +63,7 @@ from pathlib import Path
 from datetime import datetime
 
 # Hook version (for auto-updates)
-HOOK_VERSION = "2.2.0"
+HOOK_VERSION = "2.4.0"
 
 # Log directory - use ~/.claude/slack/logs as default
 LOG_DIR = os.environ.get("SLACK_LOG_DIR", os.path.expanduser("~/.claude/slack/logs"))
@@ -602,9 +604,9 @@ def extract_target_from_command(tool_name, tool_input):
                     # Return just the last directory component
                     return os.path.basename(path)
 
-        # Extract command from sudo (handles hyphenated commands like apt-get)
+        # Extract command from sudo
         if 'sudo' in command:
-            match = re.search(r'sudo\s+([\w-]+)', command)
+            match = re.search(r'sudo\s+(\w+)', command)
             if match:
                 return f"sudo {match.group(1)}"
 
@@ -665,9 +667,8 @@ def determine_permission_context(tool_name, tool_input):
     if tool_name == "Bash":
         command = tool_input.get('command', '')
 
-        # Check for background process (& followed by space or end, but not &> or &&)
-        # Matches: "cmd &", "cmd & other", "2>&1 & cmd"
-        if re.search(r'(?<![>&])\s&\s', command) or re.search(r'(?<![>&])\s&$', command):
+        # Check for background process (& at end)
+        if re.search(r'&\s*$', command):
             debug_log(f"Detected background process: {command[:50]}", "PERMISSION")
             return ("bash_background_or_tmp", 2)
 
@@ -676,25 +677,10 @@ def determine_permission_context(tool_name, tool_input):
             debug_log(f"Detected /tmp operation: {command[:50]}", "PERMISSION")
             return ("bash_background_or_tmp", 2)
 
-        # Check for dangerous commands that often only get Yes/No (2 options)
-        # pkill, kill, rm -rf, etc. are risky enough that Claude may not offer "don't ask again"
-        dangerous_2_option_patterns = [
-            r'\bpkill\b',
-            r'\bkillall\b',
-            r'\bkill\s+-9\b',
-            r'\brm\s+-rf\b',
-            r'\brm\s+-r\b',
-            r'\bsudo\b',
-            r'\bchmod\s+777\b',
-            r'\bmkfs\b',
-            r'\bdd\s+if=',
-        ]
-        for pattern in dangerous_2_option_patterns:
-            if re.search(pattern, command):
-                debug_log(f"Detected dangerous command ({pattern}): {command[:50]}", "PERMISSION")
-                return ("bash_dangerous", 2)
-
-        # Note: sudo is already handled above as a dangerous 2-option command
+        # Check for sudo commands
+        if re.search(r'\bsudo\b', command):
+            debug_log(f"Detected sudo command: {command[:50]}", "PERMISSION")
+            return ("bash_sudo", 3)
 
         # Check for directory listing/access (ls, cd to out-of-scope)
         if re.search(r'\bls\b', command):
@@ -869,11 +855,13 @@ def enhance_notification_message(
         session_id: Claude session ID
 
     Returns:
-        Tuple of (enhanced_message, permission_options) where permission_options
-        is a list of option strings for permission prompts, or None for other types
+        Tuple of (enhanced_message, permission_options, use_buttons) where:
+        - permission_options is a list of option strings for emoji reactions
+        - use_buttons is True only when we have exact options from buffer (safe to show buttons)
     """
     enhanced = message
     permission_options = None  # Will be populated for permission prompts
+    use_buttons = False  # Only True when we have exact options from buffer
 
     try:
         # Import transcript parser
@@ -885,54 +873,9 @@ def enhance_notification_message(
 
             # FIRST: Try to get exact permission text from output buffer
             exact_options_from_buffer = None
+            buffer_file = os.path.join(LOG_DIR, f"claude_output_{session_id}.txt")
 
-            # Find buffer file - try multiple strategies since session_id from hook
-            # may not match wrapper's buffer file name
-            buffer_file = None
-            import glob
-
-            # Strategy 1: Try exact session_id match first
-            exact_buffer = os.path.join(LOG_DIR, f"claude_output_{session_id}.txt")
-            if os.path.exists(exact_buffer):
-                buffer_file = exact_buffer
-                debug_log(f"Found buffer file by exact session_id: {buffer_file}", "ENHANCE")
-
-            # Strategy 2: Look up buffer_file_path from registry (most reliable)
-            if not buffer_file:
-                try:
-                    # First try by session_id
-                    session_record = db.get_session(session_id)
-                    if session_record and session_record.get('buffer_file_path'):
-                        if os.path.exists(session_record['buffer_file_path']):
-                            buffer_file = session_record['buffer_file_path']
-                            debug_log(f"Found buffer file from registry (session_id): {buffer_file}", "ENHANCE")
-
-                    # If not found, try by project_dir
-                    if not buffer_file and project_dir:
-                        wrapper_session = db.get_by_project_dir(project_dir, status='active')
-                        if wrapper_session and wrapper_session.get('buffer_file_path'):
-                            if os.path.exists(wrapper_session['buffer_file_path']):
-                                buffer_file = wrapper_session['buffer_file_path']
-                                debug_log(f"Found buffer file from registry (project_dir): {buffer_file}", "ENHANCE")
-                except Exception as e:
-                    debug_log(f"Error looking up buffer from registry: {e}", "ENHANCE")
-
-            # Strategy 3: Last resort - most recently modified (only if single instance likely)
-            if not buffer_file:
-                buffer_pattern = os.path.join(LOG_DIR, "claude_output_*.txt")
-                buffer_files = glob.glob(buffer_pattern)
-                if len(buffer_files) == 1:
-                    # Only one buffer file - safe to use
-                    buffer_file = buffer_files[0]
-                    debug_log(f"Found single buffer file: {buffer_file}", "ENHANCE")
-                elif buffer_files:
-                    # Multiple buffer files - risky, but try most recent
-                    buffer_file = max(buffer_files, key=os.path.getmtime)
-                    debug_log(f"WARNING: Multiple buffer files ({len(buffer_files)}), using most recent: {buffer_file}", "ENHANCE")
-                else:
-                    debug_log(f"No buffer files found matching {buffer_pattern}", "ENHANCE")
-
-            if buffer_file and os.path.exists(buffer_file):
+            if os.path.exists(buffer_file):
                 try:
                     # RETRY LOOP: Buffer might not be ready yet, check multiple times
                     # 10 attempts × 0.2s = 2 seconds max wait (unnoticeable to user)
@@ -963,7 +906,7 @@ def enhance_notification_message(
                             time.sleep(retry_delay)
 
                     if not exact_options_from_buffer:
-                        debug_log("All buffer read attempts failed, will use safe 2-option default", "ENHANCE")
+                        debug_log("All buffer read attempts failed, falling back to hardcoded mapping", "ENHANCE")
 
                 except Exception as e:
                     debug_log(f"Error reading buffer: {e}", "ENHANCE")
@@ -1015,45 +958,51 @@ def enhance_notification_message(
                     if snippet:
                         enhanced += f"\n_Context: {snippet}..._\n"
 
-                # Add numbered response options
-                # Priority: Buffer options (exact count) > Safe 2-option default
-                # We NO LONGER fall back to hardcoded 3-option mapping because it's unreliable
-                if exact_options_from_buffer:
-                    options_to_use = exact_options_from_buffer
-                    debug_log(f"Using EXACT options from OUTPUT BUFFER ({len(options_to_use)} options)", "ENHANCE")
-                    # Clear buffer after successful extraction
-                    try:
-                        if buffer_file:
+                # Add numbered response options with EXACT Claude wording
+                # CRITICAL: Only use interactive buttons when we have EXACT options from buffer
+                # Using hardcoded/fallback options with buttons is DANGEROUS because the
+                # number of options might not match the CLI, causing wrong responses
+                options_to_use = exact_options_from_buffer or exact_options
+                use_buttons = False  # Only set True for exact buffer match
+
+                if options_to_use:
+                    if exact_options_from_buffer:
+                        debug_log(f"Using EXACT options from OUTPUT BUFFER ({len(options_to_use)} options)", "ENHANCE")
+                        # Clear buffer after successful extraction
+                        try:
                             with open(buffer_file, 'wb') as f:
                                 pass  # Truncate file
                             debug_log("Output buffer cleared", "ENHANCE")
-                    except Exception as e:
-                        debug_log(f"Failed to clear buffer: {e}", "ENHANCE")
+                        except Exception as e:
+                            debug_log(f"Failed to clear buffer: {e}", "ENHANCE")
+
+                        # ONLY allow interactive buttons when we have exact buffer options
+                        permission_options = options_to_use
+                        use_buttons = True
+                    else:
+                        debug_log(f"Using hardcoded mapping options ({len(options_to_use)} options) - NO BUTTONS, NO REACTIONS (unsafe - may mismatch CLI)", "ENHANCE")
+                        # SAFETY: Don't set permission_options - we don't know actual CLI option count
+                        # Emoji reactions could cause user to send wrong number to CLI
+                        permission_options = None
+                        use_buttons = False
+
+                    # ALWAYS add the full text with numbered options (for reference only when fallback)
+                    enhanced += "\n**Reply with:**\n"
+                    for i, option in enumerate(options_to_use, 1):
+                        enhanced += f"{i}. {option}\n"
                 else:
-                    # SAFE DEFAULT: Always use 2 options (Yes/No) when we can't parse buffer
-                    # This prevents the bug where we show 3 options but Claude only has 2
-                    # Clicking "2" on a 2-option prompt means "No", not "Yes and remember"
-                    debug_log("Buffer parsing failed - using safe 2-option default (Yes/No)", "ENHANCE")
-                    options_to_use = [
-                        "Yes",
-                        "No, and tell Claude what to do differently"
-                    ]
-
-                # Store permission options for interactive buttons
-                permission_options = options_to_use
-
-                enhanced += "\n**Reply with:**\n"
-                for i, option in enumerate(options_to_use, 1):
-                    enhanced += f"{i}. {option}\n"
+                    debug_log("WARNING: No exact options found - NO BUTTONS, NO REACTIONS", "ENHANCE")
+                    # SAFETY: Don't add any reactions - we don't know actual option count
+                    permission_options = None
+                    use_buttons = False
+                    enhanced += "\n**Reply with a number from the terminal prompt**"
             else:
                 # Fallback if retry parsing timed out or failed
-                # Use safe 2-option default (Yes/No) since we can't determine actual option count
-                debug_log("Retry parse FAILED/TIMEOUT - using safe 2-option fallback", "ENHANCE")
-                permission_options = [
-                    "Yes",
-                    "No, and tell Claude what to do differently"
-                ]
-                enhanced = f"⚠️ {message}\n\n**Reply with:**\n1. Yes\n2. No, and tell Claude what to do differently"
+                debug_log("Retry parse FAILED/TIMEOUT - NO BUTTONS, NO REACTIONS", "ENHANCE")
+                # SAFETY: Don't add any reactions - we don't know actual option count
+                permission_options = None
+                use_buttons = False
+                enhanced = f"⚠️ {message}\n\n**Reply with a number from the terminal prompt**"
 
         # For idle prompts, include context about what Claude last said
         elif notification_type == "idle_prompt" and os.path.exists(transcript_path):
@@ -1080,7 +1029,118 @@ def enhance_notification_message(
         debug_log(f"Failed to enhance notification: {e}", "ERROR")
         enhanced = message
 
-    return (enhanced, permission_options)
+    # Return tuple: (enhanced_message, permission_options, use_buttons)
+    # use_buttons is True only when we have exact options from buffer
+    return (enhanced, permission_options, use_buttons)
+
+
+def should_show_buttons(permission_options: list) -> bool:
+    """
+    Check if permission options should display as interactive buttons.
+
+    Only show buttons for these specific patterns:
+    - 2 options: "Yes" / "No"
+    - 3 options: "Yes" / "Yes, allow..." / "No"
+
+    Args:
+        permission_options: List of permission option strings
+
+    Returns:
+        True if buttons should be shown, False otherwise
+    """
+    if not permission_options:
+        return False
+
+    num_options = len(permission_options)
+
+    # Pattern 1: Simple Yes/No (2 options)
+    if num_options == 2:
+        opt1 = permission_options[0].lower().strip()
+        opt2 = permission_options[1].lower().strip()
+        if opt1 == "yes" and opt2.startswith("no"):
+            return True
+
+    # Pattern 2: Yes / Yes, allow... / No (3 options)
+    if num_options == 3:
+        opt1 = permission_options[0].lower().strip()
+        opt2 = permission_options[1].lower().strip()
+        opt3 = permission_options[2].lower().strip()
+        # First option is "Yes", second starts with "Yes, allow", third starts with "No"
+        if (opt1 == "yes" and
+            opt2.startswith("yes, allow") and
+            opt3.startswith("no")):
+            return True
+
+    return False
+
+
+def cleanup_stale_permission_message(session: dict, db, bot_token: str) -> bool:
+    """
+    Clean up any stale permission message for a session before posting a new notification.
+
+    This handles the case where a user responds to a permission prompt via terminal
+    (not Slack) - the Slack message with buttons stays visible. When a NEW notification
+    comes in (permission or otherwise), the old message is stale and should be deleted.
+
+    Args:
+        session: Session dict from registry
+        db: RegistryDatabase instance
+        bot_token: Slack bot token
+
+    Returns:
+        True if message was cleaned up, False otherwise
+    """
+    permission_ts = session.get('permission_message_ts')
+    if not permission_ts:
+        debug_log("No pending permission message to clean up", "CLEANUP")
+        return False
+
+    channel = session.get('channel')
+    if not channel:
+        debug_log("No channel for permission cleanup", "CLEANUP")
+        return False
+
+    debug_log(f"Found stale permission message: {permission_ts} in channel {channel}", "CLEANUP")
+
+    try:
+        from slack_sdk import WebClient
+        from slack_sdk.errors import SlackApiError
+
+        client = WebClient(token=bot_token)
+
+        # Delete the stale permission message
+        client.chat_delete(
+            channel=channel,
+            ts=permission_ts
+        )
+
+        log_info(f"Cleaned up stale permission message: {permission_ts}")
+
+        # Clear the permission_message_ts in the registry
+        session_id = session.get('session_id')
+        if session_id:
+            db.update_session(session_id, {'permission_message_ts': None})
+            debug_log(f"Cleared permission_message_ts for session {session_id[:8]}", "CLEANUP")
+
+        return True
+
+    except SlackApiError as e:
+        error_msg = e.response.get('error', str(e))
+        if error_msg == 'message_not_found':
+            # Message was already deleted (e.g., via button click)
+            debug_log(f"Permission message already deleted: {permission_ts}", "CLEANUP")
+            # Still clear the ts in registry
+            session_id = session.get('session_id')
+            if session_id:
+                db.update_session(session_id, {'permission_message_ts': None})
+            return True
+        else:
+            log_error(f"Failed to delete permission message: {error_msg}")
+        return False
+
+    except Exception as e:
+        log_error(f"Error cleaning up permission message: {e}")
+        return False
 
 
 def post_to_slack(channel: str, thread_ts: str, text: str, bot_token: str, add_number_reactions: bool = False,
@@ -1102,14 +1162,33 @@ def post_to_slack(channel: str, thread_ts: str, text: str, bot_token: str, add_n
         from slack_sdk.errors import SlackApiError
     except ImportError:
         log_error("slack_sdk not installed. Run: pip install slack-sdk")
-        return False
+        return (False, None)
 
     client = WebClient(token=bot_token)
 
-    # For permission prompts with interactive buttons, use Block Kit
-    if use_interactive_buttons and permission_options:
-        debug_log("Using interactive Block Kit buttons for permission prompt", "SLACK")
-        return post_permission_card(client, channel, thread_ts, text, permission_options)
+    # Determine if we should add buttons and/or reactions
+    # Permission prompts: always show text + reactions, optionally add buttons
+    add_option_reactions = add_number_reactions and permission_options
+    num_options = len(permission_options) if permission_options else 0
+
+    if use_interactive_buttons and permission_options and should_show_buttons(permission_options):
+        debug_log(f"Using Block Kit buttons + text + reactions for permission prompt ({len(permission_options)} options)", "SLACK")
+        # Post permission card with buttons, then add emoji reactions
+        success, message_ts = post_permission_card(client, channel, thread_ts, text, permission_options)
+        if success and message_ts:
+            # Add emoji reactions for quick response (even with buttons)
+            import time
+            all_number_emojis = ["one", "two", "three", "four", "five"]
+            for emoji in all_number_emojis[:num_options]:
+                try:
+                    client.reactions_add(channel=channel, timestamp=message_ts, name=emoji)
+                    time.sleep(0.15)
+                except Exception as e:
+                    debug_log(f"Failed to add reaction {emoji}: {e}", "SLACK")
+        return (success, message_ts)
+
+    elif use_interactive_buttons and permission_options:
+        debug_log(f"Skipping buttons (pattern mismatch) - will add reactions for {len(permission_options)} options", "SLACK")
 
     # Split message if too long
     chunks = split_message(text)
@@ -1122,6 +1201,7 @@ def post_to_slack(channel: str, thread_ts: str, text: str, bot_token: str, add_n
     # Post each chunk
     failed_chunks = []
     last_message_ts = None  # Track the last message for adding reactions
+    last_channel_id = None  # Track the channel ID (needed for reactions)
 
     for i, chunk in enumerate(chunks):
         try:
@@ -1141,8 +1221,10 @@ def post_to_slack(channel: str, thread_ts: str, text: str, bot_token: str, add_n
 
             response = client.chat_postMessage(**post_kwargs)
 
-            # Save the message timestamp for adding reactions
+            # Save the message timestamp and channel ID for adding reactions
+            # IMPORTANT: Use channel ID from response, not channel name (reactions require ID)
             last_message_ts = response.get("ts")
+            last_channel_id = response.get("channel")
 
             log_info(f"Posted to Slack (part {i+1}/{len(chunks)})")
 
@@ -1156,16 +1238,25 @@ def post_to_slack(channel: str, thread_ts: str, text: str, bot_token: str, add_n
             continue
 
     # Add number emoji reactions for quick responses (on last message only)
-    # This is the fallback if interactive buttons aren't used
-    if add_number_reactions and last_message_ts:
+    # Used when: explicit add_number_reactions=True OR when buttons were skipped for non-standard options
+    should_add_reactions = add_number_reactions or add_option_reactions
+    if should_add_reactions and last_message_ts and last_channel_id:
         import time
-        debug_log("Adding number emoji reactions for quick response", "SLACK")
-        number_emojis = ["one", "two", "three"]  # 1️⃣ 2️⃣ 3️⃣
+        # All available number emojis
+        all_number_emojis = ["one", "two", "three", "four", "five"]  # 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣
+
+        # Use the right number of reactions based on options count
+        if add_option_reactions and num_options > 0:
+            number_emojis = all_number_emojis[:num_options]
+            debug_log(f"Adding {len(number_emojis)} number emoji reactions for {num_options} options", "SLACK")
+        else:
+            number_emojis = all_number_emojis[:3]  # Default to 3 reactions
+            debug_log("Adding default 3 number emoji reactions for quick response", "SLACK")
 
         for emoji in number_emojis:
             try:
                 client.reactions_add(
-                    channel=channel,
+                    channel=last_channel_id,  # Use channel ID from response, not channel name
                     timestamp=last_message_ts,
                     name=emoji
                 )
@@ -1179,9 +1270,10 @@ def post_to_slack(channel: str, thread_ts: str, text: str, bot_token: str, add_n
 
     if failed_chunks:
         log_error(f"Failed to post chunks: {failed_chunks}")
-        return False
+        return (False, None)
 
-    return True
+    # Return tuple (success, message_ts) - message_ts is for the last chunk posted
+    return (True, last_message_ts)
 
 
 def post_permission_card(client, channel: str, thread_ts: str, text: str, permission_options: list):
@@ -1199,58 +1291,29 @@ def post_permission_card(client, channel: str, thread_ts: str, text: str, permis
         permission_options: List of permission option strings
 
     Returns:
-        True if posted successfully, False otherwise
+        Tuple of (success: bool, message_ts: str or None)
     """
     try:
         from slack_sdk.errors import SlackApiError
     except ImportError:
         log_error("slack_sdk not installed")
-        return False
+        return (False, None)
 
     debug_log(f"Building permission card with {len(permission_options)} options", "SLACK")
 
-    # Parse text to extract tool info and context
-    # Format expected: "⚠️ **Permission Required: ToolName**\n\n**Command:** `...`\n..."
-    lines = text.split('\n')
-    header_line = lines[0] if lines else "Permission Required"
-
-    # Extract tool name from header
-    import re
-    tool_match = re.search(r'Permission Required:\s*(\w+)', header_line)
-    tool_name = tool_match.group(1) if tool_match else "Tool"
-
-    # Build context sections
-    context_lines = []
-    for line in lines[1:]:
-        line = line.strip()
-        if line and not line.startswith('**Reply with:**') and not re.match(r'^\d+\.', line):
-            context_lines.append(line)
-
-    # Build Block Kit blocks
+    # Build Block Kit blocks with FULL text + buttons
+    # The full text is always shown so users can see all options
     blocks = [
-        # Header
+        # Full message text (includes all numbered options)
         {
-            "type": "header",
-            "text": {
-                "type": "plain_text",
-                "text": f"⚠️ Permission Required: {tool_name}",
-                "emoji": True
-            }
-        }
-    ]
-
-    # Add context as a section (limit to first few meaningful lines)
-    context_text = '\n'.join(context_lines[:4])
-    if context_text:
-        blocks.append({
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": context_text
+                "text": text[:3000]  # Slack section text limit is 3000 chars
             }
-        })
-
-    blocks.append({"type": "divider"})
+        },
+        {"type": "divider"}
+    ]
 
     # Build action buttons
     # Each button sends its number as the value, which will be forwarded to Claude
@@ -1311,17 +1374,19 @@ def post_permission_card(client, channel: str, thread_ts: str, text: str, permis
             post_kwargs["thread_ts"] = thread_ts
 
         response = client.chat_postMessage(**post_kwargs)
-        debug_log(f"Permission card posted successfully: {response.get('ts')}", "SLACK")
+        message_ts = response.get('ts')
+        debug_log(f"Permission card posted successfully: {message_ts}", "SLACK")
         log_info("Posted permission card to Slack")
-        return True
+        # Return tuple of (success, message_ts) for tracking
+        return (True, message_ts)
 
     except SlackApiError as e:
         log_error(f"Slack API error posting permission card: {e.response['error']}")
         debug_log(f"Full error: {e}", "SLACK")
-        return False
+        return (False, None)
     except Exception as e:
         log_error(f"Error posting permission card: {e}")
-        return False
+        return (False, None)
 
 
 def main():
@@ -1474,8 +1539,14 @@ def main():
 
         debug_log("Bot token found, enhancing notification message...", "SLACK")
 
+        # Clean up any stale permission message before posting a new notification
+        # This handles the case where user responded via terminal (not Slack)
+        if session.get('permission_message_ts'):
+            debug_log("Found stale permission_message_ts, cleaning up before posting new notification", "CLEANUP")
+            cleanup_stale_permission_message(session, db, bot_token)
+
         # Enhance notification message with context
-        enhanced_message, permission_options = enhance_notification_message(
+        enhanced_message, permission_options, use_buttons = enhance_notification_message(
             notification_message,
             notification_type,
             transcript_path,
@@ -1484,37 +1555,45 @@ def main():
         debug_log(f"Enhanced message (first 200 chars): {enhanced_message[:200]}", "SLACK")
         if permission_options:
             debug_log(f"Permission options: {permission_options}", "SLACK")
+            debug_log(f"Use buttons: {use_buttons}", "SLACK")
 
         # Post notification to Slack
-        # For permission prompts, use interactive buttons (Block Kit cards)
-        success = post_to_slack(
+        # For permission prompts:
+        # - Always show full text with numbered options
+        # - If use_buttons=True (exact match from buffer): also show buttons
+        # - Always add emoji reactions for quick response
+        result = post_to_slack(
             target_channel,
             target_thread_ts,  # May be None for top-level messages
             enhanced_message,
             bot_token,
-            add_number_reactions=False,  # Replaced by interactive buttons
-            use_interactive_buttons=is_permission_prompt,
+            add_number_reactions=is_permission_prompt,  # Always add emoji reactions for permissions
+            use_interactive_buttons=(is_permission_prompt and use_buttons),  # Only buttons on exact match
             permission_options=permission_options
         )
+
+        # Unpack result tuple (success, message_ts)
+        success, permission_msg_ts = result if isinstance(result, tuple) else (result, None)
 
         if success:
             log_info("Successfully posted to Slack")
             debug_log("Slack post successful", "SLACK")
+
+            # Store permission_message_ts in registry for cleanup later
+            # When user responds via terminal (not Slack), we can delete this stale message
+            if is_permission_prompt and permission_msg_ts:
+                try:
+                    # Get the actual session_id from the registry record
+                    actual_session_id = session.get('session_id', session_id)
+                    db.update_session(actual_session_id, {'permission_message_ts': permission_msg_ts})
+                    debug_log(f"Stored permission_message_ts: {permission_msg_ts} for session {actual_session_id[:8]}", "REGISTRY")
+                    log_info(f"Stored permission message ts for cleanup tracking")
+                except Exception as e:
+                    debug_log(f"Failed to store permission_message_ts: {e}", "ERROR")
+                    # Don't fail the hook if we can't store the ts
         else:
             log_info("Failed to post to Slack (see errors above)")
             debug_log("Slack post failed", "SLACK")
-
-        # Forward notification to DM subscribers
-        try:
-            from dm_mode import forward_to_dm_subscribers
-            from slack_sdk import WebClient
-            dm_client = WebClient(token=bot_token)
-            forward_to_dm_subscribers(db, session_id, enhanced_message, dm_client)
-            debug_log("Forwarded notification to DM subscribers", "DM")
-        except ImportError:
-            debug_log("dm_mode not available, skipping DM forwarding", "DM")
-        except Exception as e:
-            debug_log(f"Error forwarding notification to DM: {e}", "DM")
 
     except Exception as e:
         # Catch-all error handler

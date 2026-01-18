@@ -298,6 +298,25 @@ When you send a message while attached, you'll see confirmation like:
 - `✅ Sent to Claude` (execute mode)
 - `✅ Sent to Claude [research]` (with mode indicator)
 
+### Global Shortcuts
+
+Instead of DM commands, you can use Slack's global shortcuts (⚡ menu) from anywhere:
+
+| Shortcut | Description |
+|----------|-------------|
+| **Get Sessions** | View all active Claude sessions in a modal |
+| **Attach to Session** | Open session picker modal to subscribe |
+| **Research Mode** | Set mode to read-only exploration |
+| **Plan Mode** | Set mode to design approach |
+| **Execute Mode** | Set mode to implement changes |
+
+To use shortcuts:
+1. Click the ⚡ lightning bolt in Slack's message input
+2. Search for "Claude" or the shortcut name
+3. Select the shortcut
+
+Shortcuts work from any channel or DM - no need to message the bot directly.
+
 ---
 
 ## Command Reference
@@ -312,6 +331,28 @@ When you send a message while attached, you'll see confirmation like:
 | `claude-slack-cleanup` | Clean up stale sessions |
 | `claude-slack-test` | Test Slack connection |
 | `claude-slack-ensure` | Ensure listener is running (starts if needed) |
+| `claude-slack-update-hooks` | Update hooks to latest version (safe, backs up customizations) |
+
+---
+
+## Updating Hooks
+
+When you `git pull` updates, run:
+
+```bash
+claude-slack-update-hooks
+```
+
+This safely updates the Claude Code hooks in `.claude/hooks/`:
+- **Version checking**: Only updates hooks with newer versions
+- **Backup**: Customized hooks are backed up to `.claude/hooks/backup/` before updating
+- **Safe**: Won't overwrite your customizations without warning
+
+Options:
+```bash
+claude-slack-update-hooks --check   # Check for updates without applying
+claude-slack-update-hooks --force   # Force update all (backs up customized)
+```
 
 ---
 

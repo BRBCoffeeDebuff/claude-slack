@@ -104,6 +104,7 @@ class SessionRecord(Base):
     reply_to_ts = Column(String(50), nullable=True)      # Message ts to thread responses to
     todo_message_ts = Column(String(50), nullable=True)  # Message ts for live todo updates
     buffer_file_path = Column(String(512), nullable=True)  # Path to terminal output buffer file
+    permission_message_ts = Column(String(50), nullable=True)  # Message ts for pending permission prompt
 
     # Status tracking
     status = Column(String(20), nullable=False, default='active')  # active/idle/terminated
@@ -133,6 +134,7 @@ class SessionRecord(Base):
             'reply_to_ts': self.reply_to_ts,
             'todo_message_ts': self.todo_message_ts,
             'buffer_file_path': self.buffer_file_path,
+            'permission_message_ts': self.permission_message_ts,
             'status': self.status,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'last_activity': self.last_activity.isoformat() if self.last_activity else None,
@@ -221,6 +223,12 @@ class RegistryDatabase:
             if 'buffer_file_path' not in columns:
                 print(f"[Migration] Adding buffer_file_path column to sessions table", flush=True)
                 conn.execute(text("ALTER TABLE sessions ADD COLUMN buffer_file_path VARCHAR(512)"))
+                conn.commit()
+
+            # Add permission_message_ts column if not exists (for cleaning up stale permission prompts)
+            if 'permission_message_ts' not in columns:
+                print(f"[Migration] Adding permission_message_ts column to sessions table", flush=True)
+                conn.execute(text("ALTER TABLE sessions ADD COLUMN permission_message_ts VARCHAR(50)"))
                 conn.commit()
 
             # Create dm_subscriptions table if not exists
@@ -321,7 +329,7 @@ class RegistryDatabase:
 
             # Update allowed fields
             for key, value in updates.items():
-                if key in ('slack_thread_ts', 'slack_channel', 'permissions_channel', 'slack_user_id', 'status', 'last_activity', 'project_dir', 'reply_to_ts', 'todo_message_ts', 'buffer_file_path'):
+                if key in ('slack_thread_ts', 'slack_channel', 'permissions_channel', 'slack_user_id', 'status', 'last_activity', 'project_dir', 'reply_to_ts', 'todo_message_ts', 'buffer_file_path', 'permission_message_ts'):
                     setattr(record, key, value)
 
             # Auto-update last_activity only if not explicitly provided

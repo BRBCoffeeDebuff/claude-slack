@@ -23,6 +23,33 @@ features:
     display_name: Claude Code Bot
     always_online: true
 
+  # Global shortcuts - accessible from Slack's ⚡ menu anywhere
+  shortcuts:
+    - name: Get Sessions
+      type: global
+      callback_id: get_sessions
+      description: List active Claude Code sessions
+
+    - name: Attach to Session
+      type: global
+      callback_id: attach_to_session
+      description: Subscribe to a session's output in your DMs
+
+    - name: Research Mode
+      type: global
+      callback_id: research_mode
+      description: Set mode to read-only exploration (no code changes)
+
+    - name: Plan Mode
+      type: global
+      callback_id: plan_mode
+      description: Set mode to design approach (no implementation)
+
+    - name: Execute Mode
+      type: global
+      callback_id: execute_mode
+      description: Set mode to implement changes (default)
+
 oauth_config:
   scopes:
     bot:
