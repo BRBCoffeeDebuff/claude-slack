@@ -2,9 +2,10 @@
 """
 Claude Code Notification Hook - Post Notifications to Slack
 
-Version: 2.4.0
+Version: 2.4.1
 
 Changelog:
+- v2.4.1 (2026/01/18): SAFETY FIX - Only show exact CLI options; default to 3 reactions when buffer parsing fails
 - v2.4.0 (2026/01/18): SAFETY FIX - No emoji reactions when buffer parsing fails (prevents option mismatch)
 - v2.3.0 (2026/01/18): Clean up stale permission messages before posting new notifications
 - v2.2.0 (2026/01/17): Added custom channel mode support (top-level messages, no threads)
@@ -63,7 +64,7 @@ from pathlib import Path
 from datetime import datetime
 
 # Hook version (for auto-updates)
-HOOK_VERSION = "2.4.0"
+HOOK_VERSION = "2.4.1"
 
 # Log directory - use ~/.claude/slack/logs as default
 LOG_DIR = os.environ.get("SLACK_LOG_DIR", os.path.expanduser("~/.claude/slack/logs"))
@@ -979,17 +980,17 @@ def enhance_notification_message(
                         # ONLY allow interactive buttons when we have exact buffer options
                         permission_options = options_to_use
                         use_buttons = True
+                        # Add exact options from buffer to message
+                        enhanced += "\n**Reply with:**\n"
+                        for i, option in enumerate(options_to_use, 1):
+                            enhanced += f"{i}. {option}\n"
                     else:
-                        debug_log(f"Using hardcoded mapping options ({len(options_to_use)} options) - NO BUTTONS, NO REACTIONS (unsafe - may mismatch CLI)", "ENHANCE")
-                        # SAFETY: Don't set permission_options - we don't know actual CLI option count
-                        # Emoji reactions could cause user to send wrong number to CLI
-                        permission_options = None
+                        debug_log(f"Buffer parsing failed - not showing hardcoded options (must match CLI exactly)", "ENHANCE")
+                        # SAFETY: Don't show interpreted text - only exact CLI options or nothing
+                        # Add 3 reactions (standard permission prompt count) for quick response
+                        permission_options = ["1", "2", "3"]  # Just for reaction count, not displayed
                         use_buttons = False
-
-                    # ALWAYS add the full text with numbered options (for reference only when fallback)
-                    enhanced += "\n**Reply with:**\n"
-                    for i, option in enumerate(options_to_use, 1):
-                        enhanced += f"{i}. {option}\n"
+                        enhanced += "\n**Reply with a number from the terminal prompt**"
                 else:
                     debug_log("WARNING: No exact options found - NO BUTTONS, NO REACTIONS", "ENHANCE")
                     # SAFETY: Don't add any reactions - we don't know actual option count
@@ -1561,13 +1562,13 @@ def main():
         # For permission prompts:
         # - Always show full text with numbered options
         # - If use_buttons=True (exact match from buffer): also show buttons
-        # - Always add emoji reactions for quick response
+        # - Add emoji reactions (count matches permission_options, capped at 2 when uncertain)
         result = post_to_slack(
             target_channel,
             target_thread_ts,  # May be None for top-level messages
             enhanced_message,
             bot_token,
-            add_number_reactions=is_permission_prompt,  # Always add emoji reactions for permissions
+            add_number_reactions=is_permission_prompt,  # Add emoji reactions for permission prompts
             use_interactive_buttons=(is_permission_prompt and use_buttons),  # Only buttons on exact match
             permission_options=permission_options
         )
