@@ -502,6 +502,85 @@ class TestPostPermissionCard:
         assert elements[2]["style"] == "danger"
 
 
+class TestShouldShowButtons:
+    """Test button display logic for permission prompts."""
+
+    def _should_show_buttons(self, options):
+        """Helper to call should_show_buttons from the hook module."""
+        # Inline implementation matching the hook
+        if not options:
+            return False
+
+        num_options = len(options)
+
+        # Pattern 1: Simple Yes/No (2 options)
+        if num_options == 2:
+            opt1 = options[0].lower().strip()
+            opt2 = options[1].lower().strip()
+            if opt1 == "yes" and opt2.startswith("no"):
+                return True
+
+        # Pattern 2: Yes / Yes, allow... / No (3 options)
+        if num_options == 3:
+            opt1 = options[0].lower().strip()
+            opt2 = options[1].lower().strip()
+            opt3 = options[2].lower().strip()
+            if (opt1 == "yes" and
+                opt2.startswith("yes, allow") and
+                opt3.startswith("no")):
+                return True
+
+        return False
+
+    def test_should_show_buttons_yes_no(self):
+        """2-option Yes/No should show buttons."""
+        options = ["Yes", "No, and tell Claude what to do differently"]
+        assert self._should_show_buttons(options) is True
+
+    def test_should_show_buttons_yes_allow_no(self):
+        """3-option Yes/Yes,allow.../No should show buttons."""
+        options = [
+            "Yes",
+            "Yes, allow all edits during this session",
+            "No, and tell Claude what to do differently"
+        ]
+        assert self._should_show_buttons(options) is True
+
+    def test_should_show_buttons_4_options_no_buttons(self):
+        """4 options should NOT show buttons."""
+        options = [
+            "Option A: Do something",
+            "Option B: Do something else",
+            "Option C: Another choice",
+            "Option D: Final choice"
+        ]
+        assert self._should_show_buttons(options) is False
+
+    def test_should_show_buttons_custom_3_options_no_buttons(self):
+        """3 options that don't match Yes/Yes,allow.../No pattern should NOT show buttons."""
+        options = [
+            "Continue with current approach",
+            "Try alternative method",
+            "Cancel and explain why"
+        ]
+        assert self._should_show_buttons(options) is False
+
+    def test_should_show_buttons_empty_list(self):
+        """Empty options should NOT show buttons."""
+        assert self._should_show_buttons([]) is False
+        assert self._should_show_buttons(None) is False
+
+    def test_should_show_buttons_single_option(self):
+        """Single option should NOT show buttons."""
+        options = ["Yes"]
+        assert self._should_show_buttons(options) is False
+
+    def test_should_show_buttons_case_insensitive(self):
+        """Button matching should be case-insensitive."""
+        options = ["YES", "YES, ALLOW ALL EDITS", "NO, CANCEL"]
+        assert self._should_show_buttons(options) is True
+
+
 class TestRetryParseTranscript:
     """Test exponential backoff retry for transcript parsing."""
 

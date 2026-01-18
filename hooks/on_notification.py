@@ -1027,6 +1027,46 @@ def enhance_notification_message(
     return (enhanced, permission_options)
 
 
+def should_show_buttons(permission_options: list) -> bool:
+    """
+    Check if permission options should display as interactive buttons.
+
+    Only show buttons for these specific patterns:
+    - 2 options: "Yes" / "No"
+    - 3 options: "Yes" / "Yes, allow..." / "No"
+
+    Args:
+        permission_options: List of permission option strings
+
+    Returns:
+        True if buttons should be shown, False otherwise
+    """
+    if not permission_options:
+        return False
+
+    num_options = len(permission_options)
+
+    # Pattern 1: Simple Yes/No (2 options)
+    if num_options == 2:
+        opt1 = permission_options[0].lower().strip()
+        opt2 = permission_options[1].lower().strip()
+        if opt1 == "yes" and opt2.startswith("no"):
+            return True
+
+    # Pattern 2: Yes / Yes, allow... / No (3 options)
+    if num_options == 3:
+        opt1 = permission_options[0].lower().strip()
+        opt2 = permission_options[1].lower().strip()
+        opt3 = permission_options[2].lower().strip()
+        # First option is "Yes", second starts with "Yes, allow", third starts with "No"
+        if (opt1 == "yes" and
+            opt2.startswith("yes, allow") and
+            opt3.startswith("no")):
+            return True
+
+    return False
+
+
 def post_to_slack(channel: str, thread_ts: str, text: str, bot_token: str, add_number_reactions: bool = False,
                    use_interactive_buttons: bool = False, permission_options: list = None):
     """
@@ -1051,9 +1091,17 @@ def post_to_slack(channel: str, thread_ts: str, text: str, bot_token: str, add_n
     client = WebClient(token=bot_token)
 
     # For permission prompts with interactive buttons, use Block Kit
-    if use_interactive_buttons and permission_options:
-        debug_log("Using interactive Block Kit buttons for permission prompt", "SLACK")
+    # Only show buttons for specific patterns: Yes/No or Yes/Yes,allow.../No
+    add_option_reactions = False
+    num_options = 0
+    if use_interactive_buttons and permission_options and should_show_buttons(permission_options):
+        debug_log(f"Using interactive Block Kit buttons for permission prompt ({len(permission_options)} options)", "SLACK")
         return post_permission_card(client, channel, thread_ts, text, permission_options)
+    elif use_interactive_buttons and permission_options:
+        # Options don't match button pattern - will add number reactions instead
+        debug_log(f"Skipping buttons - will add reactions for {len(permission_options)} options: {permission_options}", "SLACK")
+        add_option_reactions = True
+        num_options = len(permission_options)
 
     # Split message if too long
     chunks = split_message(text)
@@ -1066,6 +1114,7 @@ def post_to_slack(channel: str, thread_ts: str, text: str, bot_token: str, add_n
     # Post each chunk
     failed_chunks = []
     last_message_ts = None  # Track the last message for adding reactions
+    last_channel_id = None  # Track the channel ID (needed for reactions)
 
     for i, chunk in enumerate(chunks):
         try:
@@ -1085,8 +1134,10 @@ def post_to_slack(channel: str, thread_ts: str, text: str, bot_token: str, add_n
 
             response = client.chat_postMessage(**post_kwargs)
 
-            # Save the message timestamp for adding reactions
+            # Save the message timestamp and channel ID for adding reactions
+            # IMPORTANT: Use channel ID from response, not channel name (reactions require ID)
             last_message_ts = response.get("ts")
+            last_channel_id = response.get("channel")
 
             log_info(f"Posted to Slack (part {i+1}/{len(chunks)})")
 
@@ -1100,16 +1151,25 @@ def post_to_slack(channel: str, thread_ts: str, text: str, bot_token: str, add_n
             continue
 
     # Add number emoji reactions for quick responses (on last message only)
-    # This is the fallback if interactive buttons aren't used
-    if add_number_reactions and last_message_ts:
+    # Used when: explicit add_number_reactions=True OR when buttons were skipped for non-standard options
+    should_add_reactions = add_number_reactions or add_option_reactions
+    if should_add_reactions and last_message_ts and last_channel_id:
         import time
-        debug_log("Adding number emoji reactions for quick response", "SLACK")
-        number_emojis = ["one", "two", "three"]  # 1️⃣ 2️⃣ 3️⃣
+        # All available number emojis
+        all_number_emojis = ["one", "two", "three", "four", "five"]  # 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣
+
+        # Use the right number of reactions based on options count
+        if add_option_reactions and num_options > 0:
+            number_emojis = all_number_emojis[:num_options]
+            debug_log(f"Adding {len(number_emojis)} number emoji reactions for {num_options} options", "SLACK")
+        else:
+            number_emojis = all_number_emojis[:3]  # Default to 3 reactions
+            debug_log("Adding default 3 number emoji reactions for quick response", "SLACK")
 
         for emoji in number_emojis:
             try:
                 client.reactions_add(
-                    channel=channel,
+                    channel=last_channel_id,  # Use channel ID from response, not channel name
                     timestamp=last_message_ts,
                     name=emoji
                 )

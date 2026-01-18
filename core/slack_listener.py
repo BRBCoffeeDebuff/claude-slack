@@ -235,9 +235,35 @@ def get_socket_for_channel(channel):
         return None
 
 
+def send_to_session_socket(text: str, socket_path: str) -> bool:
+    """
+    Send a message directly to a session's Unix socket.
+
+    Args:
+        text: Message to send
+        socket_path: Path to the session's Unix socket
+
+    Returns:
+        True if sent successfully, False otherwise
+    """
+    if not socket_path or not os.path.exists(socket_path):
+        return False
+
+    try:
+        client_socket = sock_module.socket(sock_module.AF_UNIX, sock_module.SOCK_STREAM)
+        client_socket.settimeout(5.0)
+        client_socket.connect(socket_path)
+        client_socket.sendall(text.encode('utf-8'))
+        client_socket.close()
+        return True
+    except Exception as e:
+        print(f"⚠️  Failed to send to session socket: {e}", file=sys.stderr)
+        return False
+
+
 def handle_dm_message(text: str, user_id: str, dm_channel_id: str, db, slack_client, say) -> bool:
     """
-    Handle DM commands (/sessions, /attach, /detach).
+    Handle DM commands (/sessions, /attach, /detach, /mode) and forward messages to attached sessions.
 
     Args:
         text: Message text from Slack
@@ -248,14 +274,16 @@ def handle_dm_message(text: str, user_id: str, dm_channel_id: str, db, slack_cli
         say: Function to send message back to user
 
     Returns:
-        True if command was handled, False if not a DM command
+        True if message was handled (command or forwarded), False otherwise
     """
     try:
         from dm_mode import (
             parse_dm_command,
             format_session_list_for_slack,
             attach_to_session,
-            detach_from_session
+            detach_from_session,
+            handle_mode_command,
+            get_mode_prompt
         )
     except ImportError:
         return False
@@ -263,7 +291,35 @@ def handle_dm_message(text: str, user_id: str, dm_channel_id: str, db, slack_cli
     # Parse the command
     command = parse_dm_command(text)
     if command is None:
-        return False
+        # Not a command - check if user is subscribed to a session
+        subscription = db.get_dm_subscription_for_user(user_id)
+        if subscription:
+            session_id = subscription.get('session_id')
+            session = db.get_session(session_id)
+            if session and session.get('socket_path'):
+                # Get user's mode and append mode prompt if not 'execute'
+                user_mode = db.get_user_mode(user_id)
+                message_to_send = text
+                if user_mode != 'execute':
+                    mode_prompt = get_mode_prompt(user_mode)
+                    if mode_prompt:
+                        message_to_send = text + mode_prompt
+
+                # Forward message to session's socket
+                if send_to_session_socket(message_to_send, session['socket_path']):
+                    mode_indicator = f" [{user_mode}]" if user_mode != 'execute' else ""
+                    say(text=f"✅ Sent to Claude{mode_indicator}")
+                    return True
+                else:
+                    say(text="❌ Failed to send message. Session may have ended.")
+                    return True
+            else:
+                say(text="❌ Session not found or has no active socket. Use `/sessions` to see active sessions.")
+                return True
+        else:
+            # Not subscribed - tell them how to attach
+            say(text="💡 You're not attached to any session.\n\nUse `/sessions` to list sessions and `/attach <id>` to subscribe.")
+            return True
 
     # Handle each command type
     if command.command == 'sessions':
@@ -283,6 +339,13 @@ def handle_dm_message(text: str, user_id: str, dm_channel_id: str, db, slack_cli
 
     elif command.command == 'detach':
         result = detach_from_session(db, user_id, slack_client, dm_channel_id)
+        say(text=result['message'])
+        return True
+
+    elif command.command == 'mode':
+        action = command.args.get('action')
+        mode = command.args.get('mode')
+        result = handle_mode_command(db, user_id, action, mode)
         say(text=result['message'])
         return True
 

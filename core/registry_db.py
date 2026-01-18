@@ -53,6 +53,31 @@ class DMSubscription(Base):
         }
 
 
+class UserPreference(Base):
+    """
+    User preferences for Claude interaction modes.
+
+    Stores per-user settings like interaction mode (plan, research, execute).
+    Mode determines what system prompt is appended to messages.
+    """
+    __tablename__ = 'user_preferences'
+
+    user_id = Column(String(50), primary_key=True)  # Slack user ID
+    mode = Column(String(20), nullable=False, default='execute')  # plan/research/execute
+    updated_at = Column(DateTime, nullable=False, default=datetime.now)
+
+    # Valid modes
+    VALID_MODES = {'plan', 'research', 'execute'}
+
+    def to_dict(self):
+        """Convert to dictionary for JSON serialization"""
+        return {
+            'user_id': self.user_id,
+            'mode': self.mode,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class SessionRecord(Base):
     """
     Registry entry for a Claude Code session
@@ -213,6 +238,19 @@ class RegistryDatabase:
                 """))
                 conn.execute(text("CREATE INDEX idx_dm_user_id ON dm_subscriptions(user_id)"))
                 conn.execute(text("CREATE INDEX idx_dm_session_id ON dm_subscriptions(session_id)"))
+                conn.commit()
+
+            # Create user_preferences table if not exists
+            result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='user_preferences'"))
+            if not result.fetchone():
+                print(f"[Migration] Creating user_preferences table", flush=True)
+                conn.execute(text("""
+                    CREATE TABLE user_preferences (
+                        user_id VARCHAR(50) PRIMARY KEY,
+                        mode VARCHAR(20) NOT NULL DEFAULT 'execute',
+                        updated_at DATETIME NOT NULL
+                    )
+                """))
                 conn.commit()
 
     @contextmanager
@@ -436,6 +474,70 @@ class RegistryDatabase:
         with self.session_scope() as session:
             count = session.query(DMSubscription).filter_by(session_id=session_id).delete()
             return count
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # User Preferences
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def get_user_preference(self, user_id: str) -> dict:
+        """
+        Get a user's preferences.
+
+        Args:
+            user_id: Slack user ID
+
+        Returns:
+            Preference dict or None if not set
+        """
+        with self.session_scope() as session:
+            pref = session.query(UserPreference).filter_by(user_id=user_id).first()
+            return pref.to_dict() if pref else None
+
+    def set_user_mode(self, user_id: str, mode: str) -> dict:
+        """
+        Set a user's interaction mode.
+
+        Args:
+            user_id: Slack user ID
+            mode: Mode to set (plan, research, execute)
+
+        Returns:
+            Updated preference dict
+
+        Raises:
+            ValueError: If mode is not valid
+        """
+        mode = mode.lower()
+        if mode not in UserPreference.VALID_MODES:
+            raise ValueError(f"Invalid mode: {mode}. Must be one of: {', '.join(UserPreference.VALID_MODES)}")
+
+        with self.session_scope() as session:
+            pref = session.query(UserPreference).filter_by(user_id=user_id).first()
+            if pref:
+                pref.mode = mode
+                pref.updated_at = datetime.now()
+            else:
+                pref = UserPreference(
+                    user_id=user_id,
+                    mode=mode,
+                    updated_at=datetime.now()
+                )
+                session.add(pref)
+            session.flush()
+            return pref.to_dict()
+
+    def get_user_mode(self, user_id: str) -> str:
+        """
+        Get a user's current interaction mode.
+
+        Args:
+            user_id: Slack user ID
+
+        Returns:
+            Mode string (defaults to 'execute' if not set)
+        """
+        pref = self.get_user_preference(user_id)
+        return pref['mode'] if pref else 'execute'
 
 
 from datetime import timedelta

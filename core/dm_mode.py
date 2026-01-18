@@ -5,6 +5,7 @@ Provides commands for users to subscribe to session output in their DMs:
 - /sessions - List active sessions
 - /attach <session_id> [N] - Subscribe to session, optionally fetch last N messages
 - /detach - Unsubscribe from current session
+- /mode [plan|research|execute] - View or set interaction mode
 """
 
 import os
@@ -29,6 +30,7 @@ def parse_dm_command(text: str) -> Optional[DMCommand]:
     - /sessions - List active sessions
     - /attach <session_id> [history_count] - Subscribe to session
     - /detach - Unsubscribe from current session
+    - /mode [plan|research|execute] - View or set interaction mode
 
     Args:
         text: Raw message text from Slack DM
@@ -82,6 +84,22 @@ def parse_dm_command(text: str) -> Optional[DMCommand]:
 
     elif cmd == 'detach':
         return DMCommand(command='detach', args={})
+
+    elif cmd == 'mode':
+        # /mode - show current mode
+        # /mode <plan|research|execute> - set mode
+        if len(parts) < 2:
+            return DMCommand(command='mode', args={'action': 'show'})
+
+        mode = parts[1].lower()
+        valid_modes = {'plan', 'research', 'execute'}
+        if mode not in valid_modes:
+            return DMCommand(
+                command='error',
+                args={'message': f'Invalid mode: `{mode}`. Valid modes: plan, research, execute'}
+            )
+
+        return DMCommand(command='mode', args={'action': 'set', 'mode': mode})
 
     else:
         # Unknown command
@@ -390,3 +408,127 @@ def detach_from_session(db, user_id: str, slack_client, dm_channel_id: str) -> d
         'success': True,
         'message': f"✅ Detached from session `{session_id}`. You'll no longer receive output."
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mode Prompts - Appended to user messages based on their selected mode
+# ─────────────────────────────────────────────────────────────────────────────
+
+MODE_PROMPTS = {
+    'research': """
+---
+
+You are in RESEARCH MODE.
+
+Goal:
+- Understand the codebase, constraints, and problem space.
+- Identify risks, edge cases, and unknowns.
+
+Rules:
+- Do NOT propose implementation code.
+- Do NOT modify files.
+- Do NOT write tests yet.
+- You may read files, summarize behavior, and ask clarifying questions.
+
+Output:
+- Brief summary of how the current system works (relevant parts only).
+- Key assumptions and invariants.
+- Risks or ambiguities that could affect implementation.
+- Suggested test scenarios (inputs/outputs), without writing tests.
+""",
+
+    'plan': """
+---
+
+You are in PLAN MODE.
+
+Goal:
+- Design an implementation approach based on research findings.
+
+Rules:
+- Do NOT write implementation code yet.
+- You may outline pseudocode or structure.
+- Focus on approach, not implementation details.
+
+Output:
+- Step-by-step implementation plan.
+- Key files and functions to modify.
+- Potential risks and mitigations.
+""",
+
+    'execute': """
+---
+
+You are in EXECUTE MODE.
+
+Goal:
+- Implement the planned changes.
+
+Rules:
+- Follow the established plan.
+- Write clean, tested code.
+- Commit logical units of work.
+"""
+}
+
+
+def get_mode_prompt(mode: str) -> str:
+    """
+    Get the system prompt for a given mode.
+
+    Args:
+        mode: Mode name (plan, research, execute)
+
+    Returns:
+        Mode prompt string, or empty string if mode not found
+    """
+    return MODE_PROMPTS.get(mode.lower(), '')
+
+
+def handle_mode_command(db, user_id: str, action: str, mode: str = None) -> dict:
+    """
+    Handle /mode command - show or set user's interaction mode.
+
+    Args:
+        db: RegistryDatabase instance
+        user_id: Slack user ID
+        action: 'show' or 'set'
+        mode: Mode to set (only required if action='set')
+
+    Returns:
+        Dict with success: bool and message: str
+    """
+    if action == 'show':
+        current_mode = db.get_user_mode(user_id)
+        mode_descriptions = {
+            'research': 'Read-only exploration and analysis',
+            'plan': 'Design approach without writing code',
+            'execute': 'Implement changes (default)'
+        }
+        desc = mode_descriptions.get(current_mode, '')
+
+        message = f"*Current mode:* `{current_mode}`\n_{desc}_\n\n"
+        message += "*Available modes:*\n"
+        message += "• `/mode research` - Read-only exploration and analysis\n"
+        message += "• `/mode plan` - Design approach without writing code\n"
+        message += "• `/mode execute` - Implement changes (default)"
+
+        return {'success': True, 'message': message}
+
+    elif action == 'set':
+        try:
+            db.set_user_mode(user_id, mode)
+            mode_descriptions = {
+                'research': 'Read-only exploration and analysis',
+                'plan': 'Design approach without writing code',
+                'execute': 'Implement changes'
+            }
+            desc = mode_descriptions.get(mode, '')
+            return {
+                'success': True,
+                'message': f"✅ Mode set to `{mode}`\n_{desc}_"
+            }
+        except ValueError as e:
+            return {'success': False, 'message': f"❌ {str(e)}"}
+
+    return {'success': False, 'message': '❌ Invalid action'}

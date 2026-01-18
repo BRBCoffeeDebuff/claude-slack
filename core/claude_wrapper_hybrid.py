@@ -737,6 +737,10 @@ class HybridPTYWrapper:
                                 self.register_claude_session(self.claude_session_uuid)
 
                         # Inject into Claude's stdin
+                        # Normalize line endings - replace \n with \r for terminal input
+                        # This ensures multi-line messages are properly submitted
+                        data = data.replace('\n', '\r')
+
                         # VibeTunnel mode: use queue (no PTY)
                         if hasattr(self, 'slack_input_queue'):
                             # VibeTunnel mode - queue just the text (Enter added in two-step pattern)
