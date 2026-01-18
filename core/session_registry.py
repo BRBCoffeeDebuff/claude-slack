@@ -665,6 +665,16 @@ class SessionRegistry:
                 sessions = self.list_sessions(status)
                 return {"success": True, "sessions": sessions}
 
+            elif command == "UPDATE":
+                session_id = data.get("session_id")
+                updates = data.get("updates", {})
+                if not session_id:
+                    return {"success": False, "error": "session_id is required"}
+                if not updates:
+                    return {"success": False, "error": "updates dict is required"}
+                self.db.update_session(session_id, updates)
+                return {"success": True, "session_id": session_id}
+
             else:
                 return {"success": False, "error": f"Unknown command: {command}"}
 

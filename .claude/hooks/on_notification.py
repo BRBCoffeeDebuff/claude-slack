@@ -1425,6 +1425,13 @@ def main():
         debug_log(f"transcript_path: {transcript_path}", "INPUT")
         debug_log(f"project_dir: {project_dir}", "INPUT")
 
+        # Skip permission_prompt notifications - these are handled by the PermissionRequest hook
+        # The PermissionRequest hook posts to Slack with proper Allow/Deny buttons
+        if notification_type == "permission_prompt":
+            debug_log("Skipping permission_prompt - handled by PermissionRequest hook", "INPUT")
+            log_info("Permission prompt handled by PermissionRequest hook, skipping")
+            sys.exit(0)
+
         if not session_id:
             log_error("No session_id in hook data")
             sys.exit(0)
@@ -1494,6 +1501,13 @@ def main():
             target_channel = slack_channel
             target_thread_ts = slack_thread_ts
             debug_log(f"Using main channel: {target_channel}, thread_ts: {target_thread_ts}", "SLACK")
+
+        # Validate channel ID format - Slack channel IDs start with 'C' or 'G' (for private channels)
+        if target_channel and not target_channel.startswith(('C', 'G', 'D')):
+            log_error(f"Invalid channel format: '{target_channel}' looks like a name, not an ID. Channel IDs start with 'C', 'G', or 'D'.")
+            debug_log(f"Channel validation failed: '{target_channel}' is not a valid channel ID", "SLACK")
+            log_error("This session may need to be re-registered with a valid channel. Try restarting the claude-slack wrapper.")
+            sys.exit(0)
 
         # SELF-HEALING: If session exists but Slack channel is missing
         # Note: thread_ts can be None for custom channel mode (top-level messages)

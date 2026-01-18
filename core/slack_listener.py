@@ -39,6 +39,8 @@ Registry Database:
 
 import os
 import sys
+import json
+import time
 import socket as sock_module
 from pathlib import Path
 from slack_bolt import App
@@ -847,6 +849,141 @@ def handle_permission_button(ack, body, client):
 
     except Exception as e:
         print(f"❌ Error handling button click: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PermissionRequest Hook Button Handlers
+# These handle Allow/Deny/Allow Always buttons from on_permission_request.py hook
+# ─────────────────────────────────────────────────────────────────────────────
+
+PERMISSION_RESPONSE_DIR = Path.home() / ".claude" / "slack" / "permission_responses"
+PERMISSION_RESPONSE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@app.action("permission_allow")
+@app.action("permission_deny")
+@app.action("permission_allow_always")
+def handle_permission_hook_button(ack, body, client):
+    """
+    Handle permission buttons from PermissionRequest hook.
+
+    These buttons come from on_permission_request.py hook, not the notification-based
+    permission prompts. They write a response file that the hook is polling for.
+
+    Button value contains JSON: {"session_id": "...", "request_id": "...", "decision": "allow|deny|allow_always"}
+    """
+    # Acknowledge immediately (Slack requires response within 3 seconds)
+    ack()
+
+    print(f"🔐 PermissionRequest hook button clicked", file=sys.stderr)
+
+    try:
+        # Extract action info
+        actions = body.get("actions", [])
+        if not actions:
+            print(f"⚠️  No actions in button click body", file=sys.stderr)
+            return
+
+        action = actions[0]
+        action_id = action.get("action_id")
+        value_json = action.get("value", "{}")
+        user_id = body.get("user", {}).get("id")
+        user_name = body.get("user", {}).get("name", "Unknown")
+
+        print(f"🔐 Action: {action_id}, User: {user_name}", file=sys.stderr)
+
+        # Parse the button value
+        try:
+            value = json.loads(value_json)
+        except json.JSONDecodeError:
+            print(f"⚠️  Invalid JSON in button value: {value_json}", file=sys.stderr)
+            return
+
+        session_id = value.get("session_id")
+        request_id = value.get("request_id")
+        decision = value.get("decision")
+
+        if not all([session_id, request_id, decision]):
+            print(f"⚠️  Missing required fields in button value", file=sys.stderr)
+            return
+
+        print(f"🔐 Session: {session_id[:8]}, Request: {request_id}, Decision: {decision}", file=sys.stderr)
+
+        # Write response file for the hook to read
+        response_file = PERMISSION_RESPONSE_DIR / f"{session_id}_{request_id}.json"
+        response_data = {
+            "decision": decision,
+            "user_id": user_id,
+            "user_name": user_name,
+            "timestamp": time.time()
+        }
+
+        with open(response_file, 'w') as f:
+            json.dump(response_data, f)
+
+        print(f"🔐 Wrote response file: {response_file}", file=sys.stderr)
+
+        # Get message info for updating/deleting
+        message = body.get("message", {})
+        channel = body.get("channel", {}).get("id")
+        message_ts = message.get("ts")
+
+        # Update the message to show the result
+        if decision == "allow":
+            result_text = f"✅ *<@{user_id}> allowed* this action"
+            result_emoji = "✅"
+        elif decision == "allow_always":
+            result_text = f"✅ *<@{user_id}> allowed* (always for this session)"
+            result_emoji = "✅"
+        elif decision == "deny":
+            result_text = f"❌ *<@{user_id}> denied* this action"
+            result_emoji = "❌"
+        else:
+            result_text = f"*<@{user_id}>* responded: {decision}"
+            result_emoji = "🔔"
+
+        try:
+            # Try to delete the message first (keeps channel clean)
+            client.chat_delete(
+                channel=channel,
+                ts=message_ts
+            )
+            print(f"🔐 Permission message deleted", file=sys.stderr)
+
+            # Clear permission_message_ts in registry
+            if registry_db:
+                try:
+                    session = registry_db.get_session(session_id)
+                    if session:
+                        registry_db.update_session(session_id, {'permission_message_ts': None})
+                except Exception as db_e:
+                    print(f"⚠️  Could not clear permission_message_ts: {db_e}", file=sys.stderr)
+
+        except Exception as del_e:
+            # If deletion fails, update the message instead
+            print(f"⚠️  Could not delete message, updating instead: {del_e}", file=sys.stderr)
+            try:
+                client.chat_update(
+                    channel=channel,
+                    ts=message_ts,
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": result_text
+                            }
+                        }
+                    ],
+                    text=f"Permission {decision}"
+                )
+            except Exception as update_e:
+                print(f"⚠️  Could not update message either: {update_e}", file=sys.stderr)
+
+    except Exception as e:
+        print(f"❌ Error handling permission hook button: {e}", file=sys.stderr)
         import traceback
         traceback.print_exc(file=sys.stderr)
 

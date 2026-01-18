@@ -402,6 +402,22 @@ class RegistryClient:
 
         return False
 
+    def update_session(self, session_id, updates):
+        """Update session data in registry.
+
+        Args:
+            session_id: Session ID to update
+            updates: Dict of fields to update (e.g., {'buffer_file_path': '/path/to/file'})
+
+        Returns:
+            True if successful, False otherwise
+        """
+        response = self._send_command("UPDATE", {
+            "session_id": session_id,
+            "updates": updates
+        })
+        return response and response.get("success", False)
+
 
 class HybridPTYWrapper:
     """Hybrid PTY wrapper combining input control with hooks output"""
@@ -459,9 +475,68 @@ class HybridPTYWrapper:
         # Output buffer for capturing exact permission prompts (4KB ring buffer)
         # Increased from 1KB to 4KB to capture all 3 permission options
         self.output_buffer = deque(maxlen=4096)
-        self.buffer_file = os.path.join(LOG_DIR, f"claude_output_{session_id}.txt")
+
+        # Check if we're resuming a session - if so, use that ID for the buffer file
+        # This ensures the buffer file is available immediately for hooks
+        resumed_session_id = self._extract_resume_session_id()
+        if resumed_session_id:
+            self.buffer_file = os.path.join(LOG_DIR, f"claude_output_{resumed_session_id}.txt")
+            self.claude_session_uuid = resumed_session_id  # Pre-set so we don't re-detect
+            self.logger.info(f"Resuming session {resumed_session_id[:8]} - buffer file set immediately")
+        else:
+            self.buffer_file = os.path.join(LOG_DIR, f"claude_output_{session_id}.txt")
+
         self.buffer_lock = threading.Lock()
         self.logger.info(f"Output buffer initialized: {self.buffer_file}")
+
+    def _extract_resume_session_id(self):
+        """
+        Extract session ID if resuming a session.
+
+        Checks claude_args for --resume flag and extracts the session ID.
+        If --resume is present without explicit ID, tries to find the most recent session.
+
+        Returns:
+            Session ID string if resuming, None otherwise
+        """
+        if not self.claude_args:
+            return None
+
+        # Look for --resume or -r flag
+        for i, arg in enumerate(self.claude_args):
+            if arg in ('--resume', '-r'):
+                # Check if next arg is a session ID (UUID format)
+                if i + 1 < len(self.claude_args):
+                    next_arg = self.claude_args[i + 1]
+                    # Session IDs are UUIDs (36 chars with dashes)
+                    if len(next_arg) == 36 and next_arg.count('-') == 4:
+                        self.logger.info(f"Found explicit resume session ID: {next_arg[:8]}")
+                        return next_arg
+                    # Could also be short form or partial
+                    if len(next_arg) >= 8 and not next_arg.startswith('-'):
+                        self.logger.info(f"Found resume session ID (short): {next_arg[:8]}")
+                        return next_arg
+
+                # No explicit ID - try to find most recent session from transcripts
+                self.logger.debug("--resume without explicit ID, looking for most recent session")
+                try:
+                    transcript_dir = Path.home() / ".claude" / "projects" / self.project_dir.replace('/', '-').lstrip('-')
+                    if transcript_dir.exists():
+                        transcript_files = sorted(
+                            transcript_dir.glob("*.jsonl"),
+                            key=lambda f: f.stat().st_mtime,
+                            reverse=True
+                        )
+                        if transcript_files:
+                            session_id = transcript_files[0].stem
+                            self.logger.info(f"Found most recent session for resume: {session_id[:8]}")
+                            return session_id
+                except Exception as e:
+                    self.logger.warning(f"Could not find session for --resume: {e}")
+
+                return None
+
+        return None
 
     def setup_socket_directory(self):
         """Create socket directory if it doesn't exist"""
@@ -922,10 +997,10 @@ class HybridPTYWrapper:
                 if self.registry and self.registry.available:
                     try:
                         # Update wrapper session
-                        self.registry.db.update_session(self.session_id, {'buffer_file_path': new_buffer_file})
+                        self.registry.update_session(self.session_id, {'buffer_file_path': new_buffer_file})
                         # Update Claude session if registered
                         if hasattr(self, 'claude_session_uuid') and self.claude_session_uuid:
-                            self.registry.db.update_session(self.claude_session_uuid, {'buffer_file_path': new_buffer_file})
+                            self.registry.update_session(self.claude_session_uuid, {'buffer_file_path': new_buffer_file})
                         self.logger.info(f"Stored buffer_file_path in registry: {new_buffer_file}")
                     except Exception as e:
                         self.logger.warning(f"Could not store buffer_file_path in registry: {e}")
@@ -966,13 +1041,12 @@ class HybridPTYWrapper:
             except Exception as e:
                 self.logger.error(f"Error removing socket file: {e}")
 
-        # Remove buffer file
-        if os.path.exists(self.buffer_file):
-            try:
-                os.remove(self.buffer_file)
-                self.logger.debug(f"Buffer file removed: {self.buffer_file}")
-            except Exception as e:
-                self.logger.error(f"Error removing buffer file: {e}")
+        # NOTE: We intentionally do NOT remove the buffer file here.
+        # The Claude session may continue running after the wrapper exits
+        # (e.g., after context compaction creates a new wrapper).
+        # The buffer file is needed by hooks to get terminal prompt text.
+        # It will be overwritten when a new session starts, so no cleanup needed.
+        self.logger.debug(f"Buffer file preserved for hooks: {self.buffer_file}")
 
         self.logger.info("Cleanup completed")
 
