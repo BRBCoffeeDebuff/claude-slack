@@ -2,9 +2,10 @@
 """
 Claude Code Stop Hook - Post Assistant Responses to Slack
 
-Version: 1.3.0
+Version: 1.4.0
 
 Changelog:
+- v1.4.0 (2026/01/18): Clean up stale permission messages when Claude responds
 - v1.3.0 (2026/01/17): Added rich session summaries with progress, files modified, and completion status
 - v1.2.0 (2026/01/17): Added reply_to_ts threading - responses thread to the message that triggered them
 - v1.1.0 (2025/11/18): Fixed early termination bug - continue posting remaining chunks on failure
@@ -50,7 +51,7 @@ from pathlib import Path
 from datetime import datetime
 
 # Hook version for auto-update detection
-HOOK_VERSION = "1.3.0"
+HOOK_VERSION = "1.4.0"
 
 # Log directory - use ~/.claude/slack/logs as default
 LOG_DIR = os.environ.get("SLACK_LOG_DIR", os.path.expanduser("~/.claude/slack/logs"))
@@ -426,6 +427,75 @@ def post_rich_summary(channel: str, thread_ts: str, summary: dict, bot_token: st
         return False
 
 
+def cleanup_stale_permission_message(session: dict, db, bot_token: str) -> bool:
+    """
+    Clean up any stale permission message for a session.
+
+    When a user responds to a permission prompt via terminal (not Slack),
+    the Slack message with buttons stays visible. This function deletes
+    that stale message when Claude continues (responds to user).
+
+    Args:
+        session: Session dict from registry
+        db: RegistryDatabase instance
+        bot_token: Slack bot token
+
+    Returns:
+        True if message was cleaned up, False otherwise
+    """
+    permission_ts = session.get('permission_message_ts')
+    if not permission_ts:
+        debug_log("No pending permission message to clean up", "CLEANUP")
+        return False
+
+    channel = session.get('channel')
+    if not channel:
+        debug_log("No channel for permission cleanup", "CLEANUP")
+        return False
+
+    debug_log(f"Found stale permission message: {permission_ts} in channel {channel}", "CLEANUP")
+
+    try:
+        from slack_sdk import WebClient
+        from slack_sdk.errors import SlackApiError
+
+        client = WebClient(token=bot_token)
+
+        # Delete the stale permission message
+        client.chat_delete(
+            channel=channel,
+            ts=permission_ts
+        )
+
+        log_info(f"Cleaned up stale permission message: {permission_ts}")
+
+        # Clear the permission_message_ts in the registry
+        session_id = session.get('session_id')
+        if session_id:
+            db.update_session(session_id, {'permission_message_ts': None})
+            debug_log(f"Cleared permission_message_ts for session {session_id[:8]}", "CLEANUP")
+
+        return True
+
+    except SlackApiError as e:
+        error_msg = e.response.get('error', str(e))
+        if error_msg == 'message_not_found':
+            # Message was already deleted (e.g., via button click)
+            debug_log(f"Permission message already deleted: {permission_ts}", "CLEANUP")
+            # Still clear the ts in registry
+            session_id = session.get('session_id')
+            if session_id:
+                db.update_session(session_id, {'permission_message_ts': None})
+            return True
+        else:
+            log_error(f"Failed to delete permission message: {error_msg}")
+        return False
+
+    except Exception as e:
+        log_error(f"Error cleaning up permission message: {e}")
+        return False
+
+
 def post_to_slack(channel: str, thread_ts: str, text: str, bot_token: str):
     """
     Post message to Slack thread or channel, handling long messages.
@@ -675,6 +745,12 @@ def main():
             sys.exit(0)
 
         debug_log("Bot token found, posting to Slack...", "SLACK")
+
+        # Clean up any stale permission message before posting response
+        # This handles the case where user responded via terminal (not Slack)
+        if session.get('permission_message_ts'):
+            debug_log("Found stale permission_message_ts, cleaning up...", "CLEANUP")
+            cleanup_stale_permission_message(session, db, bot_token)
 
         # Post to Slack (response_thread_ts may be None for top-level)
         success = post_to_slack(slack_channel, response_thread_ts, response_text, bot_token)
