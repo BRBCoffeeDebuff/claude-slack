@@ -331,6 +331,28 @@ Shortcuts work from any channel or DM - no need to message the bot directly.
 | `claude-slack-cleanup` | Clean up stale sessions |
 | `claude-slack-test` | Test Slack connection |
 | `claude-slack-ensure` | Ensure listener is running (starts if needed) |
+| `claude-slack-update-hooks` | Update hooks to latest version (safe, backs up customizations) |
+
+---
+
+## Updating Hooks
+
+When you `git pull` updates, run:
+
+```bash
+claude-slack-update-hooks
+```
+
+This safely updates the Claude Code hooks in `.claude/hooks/`:
+- **Version checking**: Only updates hooks with newer versions
+- **Backup**: Customized hooks are backed up to `.claude/hooks/backup/` before updating
+- **Safe**: Won't overwrite your customizations without warning
+
+Options:
+```bash
+claude-slack-update-hooks --check   # Check for updates without applying
+claude-slack-update-hooks --force   # Force update all (backs up customized)
+```
 
 ---
 
