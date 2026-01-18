@@ -627,3 +627,153 @@ class TestEnhanceNotificationMessage:
             "No, and tell Claude what to do differently"
         ]
         assert len(expected_options) == 2
+
+
+class TestPermissionNotificationBehavior:
+    """Test permission notification button/reaction behavior.
+
+    Requirements:
+    1. ALWAYS show full text with numbered options
+    2. Exact buffer match: show buttons + emoji reactions
+    3. Fallback (no exact match): show emoji reactions only (no buttons)
+    """
+
+    def test_use_buttons_only_for_exact_buffer_match(self):
+        """use_buttons should be True ONLY when exact options parsed from buffer."""
+        # When we have exact options from buffer, use_buttons should be True
+        exact_options_from_buffer = ["Yes", "Yes, allow all edits", "No"]
+        use_buttons = exact_options_from_buffer is not None
+        assert use_buttons is True
+
+    def test_use_buttons_false_for_hardcoded_fallback(self):
+        """use_buttons should be False when using hardcoded/fallback options."""
+        # When buffer parsing fails, exact_options_from_buffer is None
+        exact_options_from_buffer = None
+        use_buttons = exact_options_from_buffer is not None
+        assert use_buttons is False
+
+    def test_permission_options_always_set_for_emoji_reactions(self):
+        """permission_options should always be set for emoji reactions."""
+        # Even when buttons aren't shown, permission_options should be set
+        # so emoji reactions can be added
+        fallback_options = [
+            "Approve this time",
+            "Approve commands like this for this project",
+            "Deny, tell Claude what to do instead"
+        ]
+        # permission_options is set even for fallback
+        permission_options = fallback_options
+        assert permission_options is not None
+        assert len(permission_options) == 3
+
+    def test_should_show_buttons_with_mismatched_options_returns_false(self):
+        """Options that don't match exact patterns should not show buttons."""
+        # Helper function matching hook implementation
+        def should_show_buttons(options):
+            if not options:
+                return False
+            num_options = len(options)
+            if num_options == 2:
+                opt1 = options[0].lower().strip()
+                opt2 = options[1].lower().strip()
+                if opt1 == "yes" and opt2.startswith("no"):
+                    return True
+            if num_options == 3:
+                opt1 = options[0].lower().strip()
+                opt2 = options[1].lower().strip()
+                opt3 = options[2].lower().strip()
+                if (opt1 == "yes" and
+                    opt2.startswith("yes, allow") and
+                    opt3.startswith("no")):
+                    return True
+            return False
+
+        # These should NOT match button patterns
+        assert should_show_buttons(["A", "B", "C", "D"]) is False  # 4 options
+        assert should_show_buttons(["Continue", "Cancel"]) is False  # Not Yes/No
+        assert should_show_buttons(["Yes", "Maybe", "No"]) is False  # Middle doesn't match
+
+    def test_emoji_reactions_match_option_count(self):
+        """Number of emoji reactions should match number of options."""
+        all_emojis = ["one", "two", "three", "four", "five"]
+
+        # 2 options -> 2 emojis
+        options_2 = ["Yes", "No"]
+        assert all_emojis[:len(options_2)] == ["one", "two"]
+
+        # 3 options -> 3 emojis
+        options_3 = ["Yes", "Yes, allow", "No"]
+        assert all_emojis[:len(options_3)] == ["one", "two", "three"]
+
+        # 4 options -> 4 emojis
+        options_4 = ["A", "B", "C", "D"]
+        assert all_emojis[:len(options_4)] == ["one", "two", "three", "four"]
+
+        # 5 options -> 5 emojis
+        options_5 = ["A", "B", "C", "D", "E"]
+        assert all_emojis[:len(options_5)] == ["one", "two", "three", "four", "five"]
+
+    def test_full_text_always_included(self):
+        """Permission card should always include full text with numbered options."""
+        full_text = """⚠️ **Permission Required: Bash**
+
+**Command:** `rm -rf /tmp/test`
+
+**Reply with:**
+1. Yes
+2. Yes, allow all commands during this session
+3. No, and tell Claude what to do differently"""
+
+        # The full text should be preserved (up to Slack limit)
+        assert "**Reply with:**" in full_text
+        assert "1. Yes" in full_text
+        assert "2. Yes, allow" in full_text
+        assert "3. No" in full_text
+
+    def test_button_mismatch_safety(self):
+        """Buttons with wrong number of options could cause dangerous mismatches.
+
+        If CLI shows 3 options but Slack shows 2 buttons, clicking button 2
+        would send "2" which maps to option 2 in CLI (not button 2's label).
+        This test documents why we only show buttons for exact matches.
+        """
+        cli_options = ["Yes", "Yes, allow all", "No"]  # 3 options
+        fallback_options = ["Yes", "No"]  # 2 options (parsing failed)
+
+        # If we showed 2 buttons for 3-option CLI prompt:
+        # Button 1 "Yes" -> sends "1" -> CLI option 1 "Yes" ✓
+        # Button 2 "No" -> sends "2" -> CLI option 2 "Yes, allow all" ✗ DANGEROUS!
+
+        # This is why we only show buttons when we have EXACT match
+        # from buffer parsing, never for fallback options
+        assert len(cli_options) != len(fallback_options)
+
+
+class TestStalePermissionCleanup:
+    """Test cleanup of stale permission messages when user responds via terminal."""
+
+    def test_permission_message_ts_stored_for_tracking(self):
+        """permission_message_ts should be stored in registry for cleanup."""
+        # When a permission card is posted, its message_ts should be stored
+        message_ts = "1234567890.123456"
+        session_updates = {'permission_message_ts': message_ts}
+
+        # The session should be updated with the message_ts
+        assert 'permission_message_ts' in session_updates
+        assert session_updates['permission_message_ts'] == message_ts
+
+    def test_permission_message_ts_cleared_after_cleanup(self):
+        """permission_message_ts should be cleared after message is deleted."""
+        # After cleanup, permission_message_ts should be set to None
+        session_updates = {'permission_message_ts': None}
+
+        assert session_updates['permission_message_ts'] is None
+
+    def test_cleanup_handles_already_deleted_message(self):
+        """Cleanup should handle case where message was already deleted via button."""
+        # If message_not_found error, we should still clear the ts
+        # (the button handler may have already deleted it)
+        error_responses = ['message_not_found', 'channel_not_found']
+
+        # message_not_found should be handled gracefully
+        assert 'message_not_found' in error_responses

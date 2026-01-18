@@ -806,6 +806,21 @@ def handle_permission_button(ack, body, client):
             )
             print(f"🔘 Permission message deleted (keeping channel clean)", file=sys.stderr)
 
+            # Clear permission_message_ts in registry so posttooluse hook doesn't try to delete again
+            if registry_db:
+                try:
+                    # Find session by thread_ts or channel
+                    session = None
+                    if thread_ts:
+                        session = registry_db.get_by_thread(thread_ts)
+                    if not session and channel:
+                        session = registry_db.get_by_channel(channel) if hasattr(registry_db, 'get_by_channel') else None
+                    if session:
+                        registry_db.update_session(session['session_id'], {'permission_message_ts': None})
+                        print(f"🔘 Cleared permission_message_ts for session", file=sys.stderr)
+                except Exception as db_e:
+                    print(f"⚠️  Could not clear permission_message_ts: {db_e}", file=sys.stderr)
+
         except Exception as e:
             # If deletion fails (e.g., bot lacks permissions), fall back to updating the message
             print(f"⚠️  Could not delete message, falling back to update: {e}", file=sys.stderr)

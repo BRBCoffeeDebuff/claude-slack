@@ -315,6 +315,79 @@ def post_or_update_slack(channel: str, thread_ts: str, message_ts: str, todo_dat
         return None
 
 
+def cleanup_stale_permission_message(session, db, bot_token):
+    """
+    Clean up any stale permission message for a session.
+
+    When a user responds to a permission prompt via terminal (not Slack),
+    the Slack message with buttons stays visible. This function deletes
+    that stale message when Claude continues working (i.e., a tool is executed,
+    meaning permission was granted).
+
+    Args:
+        session: Session dict from registry
+        db: RegistryDatabase instance
+        bot_token: Slack bot token
+
+    Returns:
+        True if message was cleaned up, False otherwise
+    """
+    permission_ts = session.get('permission_message_ts')
+    if not permission_ts:
+        debug_log("No pending permission message to clean up", "CLEANUP")
+        return False
+
+    channel = session.get('channel')
+    if not channel:
+        debug_log("No channel for permission cleanup", "CLEANUP")
+        return False
+
+    debug_log(f"Found stale permission message: {permission_ts} in channel {channel}", "CLEANUP")
+
+    try:
+        from slack_sdk import WebClient
+        from slack_sdk.errors import SlackApiError
+    except ImportError:
+        log_error("slack_sdk not installed")
+        return False
+
+    client = WebClient(token=bot_token)
+
+    try:
+        # Delete the stale permission message
+        client.chat_delete(
+            channel=channel,
+            ts=permission_ts
+        )
+        debug_log(f"Successfully deleted stale permission message: {permission_ts}", "CLEANUP")
+        log_info(f"Cleaned up stale permission message")
+
+        # Clear the permission_message_ts in the registry
+        session_id = session.get('session_id')
+        if session_id:
+            db.update_session(session_id, {'permission_message_ts': None})
+            debug_log(f"Cleared permission_message_ts for session {session_id[:8]}", "CLEANUP")
+
+        return True
+
+    except SlackApiError as e:
+        error_msg = e.response.get('error', str(e))
+        if error_msg == 'message_not_found':
+            # Message was already deleted (e.g., via button click)
+            debug_log(f"Permission message already deleted: {permission_ts}", "CLEANUP")
+            # Still clear the ts in registry
+            session_id = session.get('session_id')
+            if session_id:
+                db.update_session(session_id, {'permission_message_ts': None})
+        else:
+            log_error(f"Failed to delete permission message: {error_msg}")
+        return False
+
+    except Exception as e:
+        log_error(f"Error cleaning up permission message: {e}")
+        return False
+
+
 def main():
     """Main hook entry point"""
     debug_log("Entering main()", "LIFECYCLE")
@@ -336,7 +409,25 @@ def main():
         debug_log(f"session_id: {session_id}", "INPUT")
         debug_log(f"tool_name: {tool_name}", "INPUT")
 
-        # Only process TodoWrite calls
+        # PERMISSION CLEANUP: Clean up stale permission messages for ANY tool use
+        # This handles the case where user responded via terminal instead of Slack
+        if session_id:
+            try:
+                from registry_db import RegistryDatabase
+                db_path = os.environ.get("REGISTRY_DB_PATH", os.path.expanduser("~/.claude/slack/registry.db"))
+                if os.path.exists(db_path):
+                    db = RegistryDatabase(db_path)
+                    session = db.get_session(session_id)
+                    if session and session.get('permission_message_ts'):
+                        bot_token = os.environ.get("SLACK_BOT_TOKEN")
+                        if bot_token:
+                            debug_log(f"Attempting permission cleanup for session {session_id[:8]}", "CLEANUP")
+                            cleanup_stale_permission_message(session, db, bot_token)
+            except Exception as e:
+                debug_log(f"Permission cleanup failed (non-fatal): {e}", "CLEANUP")
+                # Don't fail the hook if cleanup fails
+
+        # Only process TodoWrite calls for the rest of the hook
         if tool_name != "TodoWrite":
             debug_log(f"Skipping tool: {tool_name}", "FILTER")
             sys.exit(0)
