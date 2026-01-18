@@ -12,11 +12,45 @@ Benefits:
 """
 
 from datetime import datetime
+import uuid
 from sqlalchemy import create_engine, Column, String, DateTime, Index, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from contextlib import contextmanager
 
 Base = declarative_base()
+
+
+class DMSubscription(Base):
+    """
+    DM subscription for receiving full Claude output.
+
+    Each subscription links a Slack user to a Claude session.
+    Users receive ALL terminal output in their DM while subscribed.
+    Only one subscription per user is allowed (attaching to a new session
+    auto-detaches from the previous one).
+    """
+    __tablename__ = 'dm_subscriptions'
+
+    id = Column(String(50), primary_key=True)  # UUID
+    user_id = Column(String(50), nullable=False, unique=True)  # Slack user ID (unique - one sub per user)
+    session_id = Column(String(50), nullable=False)  # Session being watched
+    dm_channel_id = Column(String(50), nullable=False)  # DM channel for this user
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+
+    __table_args__ = (
+        Index('idx_dm_user_id', 'user_id'),
+        Index('idx_dm_session_id', 'session_id'),
+    )
+
+    def to_dict(self):
+        """Convert to dictionary for JSON serialization"""
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            'session_id': self.session_id,
+            'dm_channel_id': self.dm_channel_id,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
 
 
 class SessionRecord(Base):
@@ -164,6 +198,23 @@ class RegistryDatabase:
                 conn.execute(text("ALTER TABLE sessions ADD COLUMN buffer_file_path VARCHAR(512)"))
                 conn.commit()
 
+            # Create dm_subscriptions table if not exists
+            result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='dm_subscriptions'"))
+            if not result.fetchone():
+                print(f"[Migration] Creating dm_subscriptions table", flush=True)
+                conn.execute(text("""
+                    CREATE TABLE dm_subscriptions (
+                        id VARCHAR(50) PRIMARY KEY,
+                        user_id VARCHAR(50) NOT NULL UNIQUE,
+                        session_id VARCHAR(50) NOT NULL,
+                        dm_channel_id VARCHAR(50) NOT NULL,
+                        created_at DATETIME NOT NULL
+                    )
+                """))
+                conn.execute(text("CREATE INDEX idx_dm_user_id ON dm_subscriptions(user_id)"))
+                conn.execute(text("CREATE INDEX idx_dm_session_id ON dm_subscriptions(session_id)"))
+                conn.commit()
+
     @contextmanager
     def session_scope(self):
         """
@@ -283,6 +334,107 @@ class RegistryDatabase:
             count = session.query(SessionRecord).filter(
                 SessionRecord.last_activity < cutoff
             ).delete()
+            return count
+
+    # ============================================================
+    # DM Subscription Methods
+    # ============================================================
+
+    def create_dm_subscription(self, user_id: str, session_id: str, dm_channel_id: str) -> dict:
+        """
+        Create or replace a DM subscription for a user.
+
+        Each user can only have one active subscription. Creating a new
+        subscription automatically replaces any existing one.
+
+        Args:
+            user_id: Slack user ID
+            session_id: Claude session ID to subscribe to
+            dm_channel_id: Slack DM channel ID for this user
+
+        Returns:
+            Dict with subscription data
+        """
+        with self.session_scope() as session:
+            # Check for existing subscription
+            existing = session.query(DMSubscription).filter_by(user_id=user_id).first()
+            if existing:
+                # Update existing subscription
+                existing.session_id = session_id
+                existing.dm_channel_id = dm_channel_id
+                existing.created_at = datetime.now()
+                session.flush()
+                return existing.to_dict()
+            else:
+                # Create new subscription
+                subscription = DMSubscription(
+                    id=str(uuid.uuid4()),
+                    user_id=user_id,
+                    session_id=session_id,
+                    dm_channel_id=dm_channel_id,
+                    created_at=datetime.now()
+                )
+                session.add(subscription)
+                session.flush()
+                return subscription.to_dict()
+
+    def get_dm_subscription_for_user(self, user_id: str) -> dict:
+        """
+        Get a user's current DM subscription.
+
+        Args:
+            user_id: Slack user ID
+
+        Returns:
+            Subscription dict or None if not subscribed
+        """
+        with self.session_scope() as session:
+            subscription = session.query(DMSubscription).filter_by(user_id=user_id).first()
+            return subscription.to_dict() if subscription else None
+
+    def get_dm_subscriptions_for_session(self, session_id: str) -> list:
+        """
+        Get all DM subscribers for a session.
+
+        Args:
+            session_id: Claude session ID
+
+        Returns:
+            List of subscription dicts
+        """
+        with self.session_scope() as session:
+            subscriptions = session.query(DMSubscription).filter_by(session_id=session_id).all()
+            return [s.to_dict() for s in subscriptions]
+
+    def delete_dm_subscription(self, user_id: str) -> bool:
+        """
+        Remove a user's DM subscription.
+
+        Args:
+            user_id: Slack user ID
+
+        Returns:
+            True if subscription was removed, False if none existed
+        """
+        with self.session_scope() as session:
+            subscription = session.query(DMSubscription).filter_by(user_id=user_id).first()
+            if subscription:
+                session.delete(subscription)
+                return True
+            return False
+
+    def cleanup_dm_subscriptions_for_session(self, session_id: str) -> int:
+        """
+        Remove all DM subscriptions for a session (e.g., when session ends).
+
+        Args:
+            session_id: Claude session ID
+
+        Returns:
+            Number of subscriptions removed
+        """
+        with self.session_scope() as session:
+            count = session.query(DMSubscription).filter_by(session_id=session_id).delete()
             return count
 
 

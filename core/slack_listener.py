@@ -76,12 +76,23 @@ except Exception as e:
     print(f"   Falling back to hard-coded socket path", file=sys.stderr)
 
 # Initialize Slack app
+# Note: We defer the sys.exit() to main() so that tests can import this module
+# without requiring SLACK_BOT_TOKEN to be set
+_slack_app_error = None
 try:
     app = App(token=os.environ["SLACK_BOT_TOKEN"])
 except KeyError:
-    print("❌ Error: SLACK_BOT_TOKEN environment variable not set", file=sys.stderr)
-    print("   Create a .env file from .env.example and set your tokens", file=sys.stderr)
-    sys.exit(1)
+    _slack_app_error = "SLACK_BOT_TOKEN environment variable not set"
+    # Create a dummy app for testing - decorators will work but do nothing
+    class _DummyApp:
+        """Dummy App class that accepts decorators but does nothing."""
+        def event(self, *args, **kwargs):
+            return lambda f: f
+        def action(self, *args, **kwargs):
+            return lambda f: f
+        def message(self, *args, **kwargs):
+            return lambda f: f
+    app = _DummyApp()
 
 
 def get_socket_for_thread(thread_ts):
@@ -222,6 +233,65 @@ def get_socket_for_channel(channel):
     except Exception as e:
         print(f"❌ Error querying registry for channel {channel}: {e}", file=sys.stderr)
         return None
+
+
+def handle_dm_message(text: str, user_id: str, dm_channel_id: str, db, slack_client, say) -> bool:
+    """
+    Handle DM commands (/sessions, /attach, /detach).
+
+    Args:
+        text: Message text from Slack
+        user_id: Slack user ID
+        dm_channel_id: DM channel ID
+        db: RegistryDatabase instance
+        slack_client: Slack WebClient instance
+        say: Function to send message back to user
+
+    Returns:
+        True if command was handled, False if not a DM command
+    """
+    try:
+        from dm_mode import (
+            parse_dm_command,
+            format_session_list_for_slack,
+            attach_to_session,
+            detach_from_session
+        )
+    except ImportError:
+        return False
+
+    # Parse the command
+    command = parse_dm_command(text)
+    if command is None:
+        return False
+
+    # Handle each command type
+    if command.command == 'sessions':
+        message = format_session_list_for_slack(db)
+        say(text=message)
+        return True
+
+    elif command.command == 'attach':
+        session_id = command.args.get('session_id')
+        history_count = command.args.get('history_count', 0)
+        result = attach_to_session(
+            db, user_id, session_id, dm_channel_id,
+            slack_client, history_count
+        )
+        say(text=result['message'])
+        return True
+
+    elif command.command == 'detach':
+        result = detach_from_session(db, user_id, slack_client, dm_channel_id)
+        say(text=result['message'])
+        return True
+
+    elif command.command == 'error':
+        # Error from parse_dm_command (e.g., missing session ID)
+        say(text=f"❌ {command.args.get('message', 'Invalid command')}")
+        return True
+
+    return False
 
 
 def send_response(text, thread_ts=None, channel=None):
@@ -382,6 +452,11 @@ def handle_message(event, say):
 
     if not text:
         return
+
+    # Check if this is a DM channel and try to handle as DM command
+    if channel_type == 'im':
+        if handle_dm_message(text, user, channel, registry_db, app.client, say):
+            return  # DM command handled, don't process further
 
     # Ignore messages with @mentions - those are handled by app_mention handler
     # This prevents duplicate processing when someone @mentions the bot
@@ -700,6 +775,12 @@ def handle_permission_button(ack, body, client):
 
 def main():
     """Start the Slack bot in Socket Mode"""
+    # Check if app initialization failed (deferred from module load)
+    if _slack_app_error:
+        print(f"❌ Error: {_slack_app_error}", file=sys.stderr)
+        print("   Create a .env file from .env.example and set your tokens", file=sys.stderr)
+        sys.exit(1)
+
     print("🚀 Starting Slack bot...")
     print(f"📁 Response file (fallback): {RESPONSE_FILE}")
     print(f"🔌 Legacy socket path: {SOCKET_PATH}")

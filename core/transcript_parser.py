@@ -288,6 +288,54 @@ class TranscriptParser:
 
         return sorted(list(files))
 
+    def get_last_n_messages(self, n: int = 5) -> List[Dict[str, Any]]:
+        """
+        Get the last N messages from the transcript for DM history.
+
+        Args:
+            n: Number of messages to return (default: 5, min: 1, max: 25)
+
+        Returns:
+            List of messages formatted for Slack:
+            [{'role': 'user'/'assistant', 'text': str, 'timestamp': str}, ...]
+            Messages are in chronological order (oldest first).
+        """
+        # Validate and clamp n
+        n = max(1, min(25, n))
+
+        # Get user and assistant messages (skip tool_result)
+        relevant_messages = [
+            msg for msg in self.messages
+            if msg.get('type') in ('user', 'assistant')
+        ]
+
+        # Take last n messages
+        last_n = relevant_messages[-n:] if relevant_messages else []
+
+        # Format for Slack
+        formatted = []
+        for msg in last_n:
+            role = msg.get('type')
+            timestamp = msg.get('timestamp', '')
+
+            # Extract text content
+            content = msg.get('message', {}).get('content', [])
+            text_parts = [
+                c.get('text', '')
+                for c in content
+                if c.get('type') == 'text'
+            ]
+            text = '\n'.join(text_parts).strip()
+
+            if text:  # Only include messages with actual text
+                formatted.append({
+                    'role': role,
+                    'text': text,
+                    'timestamp': timestamp
+                })
+
+        return formatted
+
     def get_stop_reason(self) -> str:
         """
         Determine the stop reason from the transcript.

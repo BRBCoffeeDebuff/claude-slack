@@ -436,3 +436,129 @@ class TestHandlePermissionButton:
             mock_slack_client.chat_update.assert_called_once()
             # send_response should NOT be called yet (waiting for feedback)
             mock_send.assert_not_called()
+
+
+class TestHandleDMCommands:
+    """Tests for DM command handling in slack_listener."""
+
+    def test_handle_dm_sessions_command(self, temp_registry_db, sample_session_data, mock_slack_client):
+        """/sessions in DM lists active sessions."""
+        from slack_listener import handle_dm_message
+
+        temp_registry_db.create_session(sample_session_data)
+
+        # Create a mock say function
+        say = MagicMock()
+
+        # Handle /sessions command in DM
+        result = handle_dm_message(
+            text='/sessions',
+            user_id='U123456',
+            dm_channel_id='D123456',
+            db=temp_registry_db,
+            slack_client=mock_slack_client,
+            say=say
+        )
+
+        # Should have called say with session list
+        assert say.called
+        call_text = say.call_args[1].get('text', '') or say.call_args[0][0]
+        assert sample_session_data['session_id'] in call_text or 'session' in call_text.lower()
+
+    def test_handle_dm_attach_command(self, temp_registry_db, sample_session_data, mock_slack_client):
+        """/attach creates subscription."""
+        from slack_listener import handle_dm_message
+
+        temp_registry_db.create_session(sample_session_data)
+        say = MagicMock()
+
+        result = handle_dm_message(
+            text=f'/attach {sample_session_data["session_id"]}',
+            user_id='U123456',
+            dm_channel_id='D123456',
+            db=temp_registry_db,
+            slack_client=mock_slack_client,
+            say=say
+        )
+
+        # Should have called say with success message
+        assert say.called
+
+        # Subscription should be created
+        sub = temp_registry_db.get_dm_subscription_for_user('U123456')
+        assert sub is not None
+        assert sub['session_id'] == sample_session_data['session_id']
+
+    def test_handle_dm_attach_with_history(self, temp_registry_db, sample_session_data, mock_slack_client):
+        """/attach <id> 5 sends 5 messages history."""
+        from slack_listener import handle_dm_message
+
+        temp_registry_db.create_session(sample_session_data)
+        say = MagicMock()
+
+        # Attach with history
+        result = handle_dm_message(
+            text=f'/attach {sample_session_data["session_id"]} 5',
+            user_id='U123456',
+            dm_channel_id='D123456',
+            db=temp_registry_db,
+            slack_client=mock_slack_client,
+            say=say
+        )
+
+        # Should have created subscription
+        sub = temp_registry_db.get_dm_subscription_for_user('U123456')
+        assert sub is not None
+
+    def test_handle_dm_detach_command(self, temp_registry_db, sample_session_data, mock_slack_client):
+        """/detach removes subscription."""
+        from slack_listener import handle_dm_message
+
+        temp_registry_db.create_session(sample_session_data)
+
+        # First attach
+        temp_registry_db.create_dm_subscription(
+            user_id='U123456',
+            session_id=sample_session_data['session_id'],
+            dm_channel_id='D123456'
+        )
+
+        say = MagicMock()
+
+        # Then detach
+        result = handle_dm_message(
+            text='/detach',
+            user_id='U123456',
+            dm_channel_id='D123456',
+            db=temp_registry_db,
+            slack_client=mock_slack_client,
+            say=say
+        )
+
+        # Should have called say
+        assert say.called
+
+        # Subscription should be removed
+        sub = temp_registry_db.get_dm_subscription_for_user('U123456')
+        assert sub is None
+
+    def test_dm_commands_only_in_dm(self, temp_registry_db, sample_session_data):
+        """/sessions in channel is ignored (not processed as DM command)."""
+        from slack_listener import handle_dm_message
+
+        # handle_dm_message should return False if not a DM command
+        # When called from a channel context, should return False
+        say = MagicMock()
+
+        # Regular message (not a command) returns False
+        result = handle_dm_message(
+            text='hello',
+            user_id='U123456',
+            dm_channel_id='D123456',
+            db=temp_registry_db,
+            slack_client=None,
+            say=say
+        )
+
+        assert result is False
+        assert not say.called

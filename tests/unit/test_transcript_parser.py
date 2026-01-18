@@ -378,3 +378,81 @@ class TestConstructTranscriptPath:
         )
         # Should not have double slashes
         assert '//' not in path or path.count('//') == 0
+
+
+class TestGetLastNMessages:
+    """Tests for get_last_n_messages()."""
+
+    def test_get_last_n_messages_default(self, mock_transcript_file):
+        """Returns last 5 messages by default, in chronological order."""
+        parser = TranscriptParser(mock_transcript_file)
+        parser.load()
+        messages = parser.get_last_n_messages()
+        assert len(messages) <= 5
+        assert all('role' in m for m in messages)
+        assert all('text' in m for m in messages)
+        assert all('timestamp' in m for m in messages)
+
+    def test_get_last_n_messages_custom_count(self, tmp_path):
+        """Returns exactly N messages when N < total."""
+        # Create transcript with more than N messages
+        transcript_path = tmp_path / "many_messages.jsonl"
+        import json
+        with open(transcript_path, 'w') as f:
+            for i in range(10):
+                msg = {
+                    'type': 'user' if i % 2 == 0 else 'assistant',
+                    'timestamp': f'2025-01-01T00:00:{i:02d}Z',
+                    'message': {'content': [{'type': 'text', 'text': f'Message {i}'}]}
+                }
+                f.write(json.dumps(msg) + '\n')
+
+        parser = TranscriptParser(str(transcript_path))
+        parser.load()
+        messages = parser.get_last_n_messages(n=3)
+        assert len(messages) == 3
+
+    def test_get_last_n_messages_max_25(self, tmp_path):
+        """N is capped at 25 even if higher requested."""
+        # Create transcript with many messages
+        transcript_path = tmp_path / "thirty_messages.jsonl"
+        import json
+        with open(transcript_path, 'w') as f:
+            for i in range(30):
+                msg = {
+                    'type': 'user' if i % 2 == 0 else 'assistant',
+                    'timestamp': f'2025-01-01T00:{i:02d}:00Z',
+                    'message': {'content': [{'type': 'text', 'text': f'Message {i}'}]}
+                }
+                f.write(json.dumps(msg) + '\n')
+
+        parser = TranscriptParser(str(transcript_path))
+        parser.load()
+        messages = parser.get_last_n_messages(n=100)
+        assert len(messages) == 25
+
+    def test_get_last_n_messages_minimum_1(self, mock_transcript_file):
+        """N=0 or negative returns at least 1 message."""
+        parser = TranscriptParser(mock_transcript_file)
+        parser.load()
+        messages = parser.get_last_n_messages(n=0)
+        assert len(messages) >= 1
+        messages = parser.get_last_n_messages(n=-5)
+        assert len(messages) >= 1
+
+    def test_get_last_n_messages_formats_for_slack(self, mock_transcript_file):
+        """Each message has: role ('user'/'assistant'), text, timestamp."""
+        parser = TranscriptParser(mock_transcript_file)
+        parser.load()
+        messages = parser.get_last_n_messages()
+        for msg in messages:
+            assert msg['role'] in ('user', 'assistant')
+            assert isinstance(msg['text'], str)
+            assert isinstance(msg['timestamp'], str)
+
+    def test_get_last_n_messages_empty_transcript(self, empty_transcript_file):
+        """Returns empty list for empty transcript."""
+        parser = TranscriptParser(empty_transcript_file)
+        parser.load()
+        messages = parser.get_last_n_messages()
+        assert messages == []

@@ -17,7 +17,7 @@ import pytest
 # Add core directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "core"))
 
-from registry_db import RegistryDatabase, SessionRecord, Base
+from registry_db import RegistryDatabase, SessionRecord, DMSubscription, Base
 
 
 class TestRegistryDatabaseInit:
@@ -418,3 +418,140 @@ class TestSchemaMigration:
             result = conn.execute(text("PRAGMA table_info(sessions)"))
             columns = [row[1] for row in result.fetchall()]
             assert 'buffer_file_path' in columns
+
+
+class TestDMSubscriptions:
+    """Tests for DM subscription CRUD methods."""
+
+    def test_create_dm_subscription(self, temp_registry_db, sample_session_data):
+        """Create subscription returns dict with user_id, session_id, dm_channel_id, created_at."""
+        # Create a session first
+        temp_registry_db.create_session(sample_session_data)
+
+        # Create subscription
+        result = temp_registry_db.create_dm_subscription(
+            user_id='U123456',
+            session_id=sample_session_data['session_id'],
+            dm_channel_id='D123456'
+        )
+
+        assert result['user_id'] == 'U123456'
+        assert result['session_id'] == sample_session_data['session_id']
+        assert result['dm_channel_id'] == 'D123456'
+        assert result['created_at'] is not None
+        assert result['id'] is not None
+
+    def test_create_dm_subscription_duplicate_replaces(self, temp_registry_db, sample_session_data):
+        """Second subscription for same user replaces first (one subscription per user)."""
+        temp_registry_db.create_session(sample_session_data)
+
+        # Create another session
+        session2_data = sample_session_data.copy()
+        session2_data['session_id'] = 'sess5678'
+        temp_registry_db.create_session(session2_data)
+
+        # Create first subscription
+        first = temp_registry_db.create_dm_subscription(
+            user_id='U123456',
+            session_id=sample_session_data['session_id'],
+            dm_channel_id='D123456'
+        )
+
+        # Create second subscription (replaces first)
+        second = temp_registry_db.create_dm_subscription(
+            user_id='U123456',
+            session_id='sess5678',
+            dm_channel_id='D123456'
+        )
+
+        # User should only have one subscription
+        sub = temp_registry_db.get_dm_subscription_for_user('U123456')
+        assert sub['session_id'] == 'sess5678'
+
+        # No subscription for first session
+        subs_for_first = temp_registry_db.get_dm_subscriptions_for_session(sample_session_data['session_id'])
+        assert len(subs_for_first) == 0
+
+    def test_get_dm_subscriptions_for_session(self, temp_registry_db, sample_session_data):
+        """Returns list of all subscribers for a session."""
+        temp_registry_db.create_session(sample_session_data)
+
+        # Create multiple subscriptions for same session
+        temp_registry_db.create_dm_subscription(
+            user_id='U111111',
+            session_id=sample_session_data['session_id'],
+            dm_channel_id='D111111'
+        )
+        temp_registry_db.create_dm_subscription(
+            user_id='U222222',
+            session_id=sample_session_data['session_id'],
+            dm_channel_id='D222222'
+        )
+
+        subs = temp_registry_db.get_dm_subscriptions_for_session(sample_session_data['session_id'])
+        assert len(subs) == 2
+        user_ids = {s['user_id'] for s in subs}
+        assert user_ids == {'U111111', 'U222222'}
+
+    def test_get_dm_subscription_for_user(self, temp_registry_db, sample_session_data):
+        """Returns user's current subscription or None."""
+        temp_registry_db.create_session(sample_session_data)
+
+        # No subscription initially
+        assert temp_registry_db.get_dm_subscription_for_user('U123456') is None
+
+        # Create subscription
+        temp_registry_db.create_dm_subscription(
+            user_id='U123456',
+            session_id=sample_session_data['session_id'],
+            dm_channel_id='D123456'
+        )
+
+        # Now should have subscription
+        sub = temp_registry_db.get_dm_subscription_for_user('U123456')
+        assert sub is not None
+        assert sub['user_id'] == 'U123456'
+
+    def test_delete_dm_subscription(self, temp_registry_db, sample_session_data):
+        """Removes subscription, returns True."""
+        temp_registry_db.create_session(sample_session_data)
+        temp_registry_db.create_dm_subscription(
+            user_id='U123456',
+            session_id=sample_session_data['session_id'],
+            dm_channel_id='D123456'
+        )
+
+        result = temp_registry_db.delete_dm_subscription('U123456')
+        assert result is True
+
+        # Subscription should be gone
+        sub = temp_registry_db.get_dm_subscription_for_user('U123456')
+        assert sub is None
+
+    def test_delete_dm_subscription_not_found(self, temp_registry_db):
+        """Returns False when no subscription exists."""
+        result = temp_registry_db.delete_dm_subscription('U999999')
+        assert result is False
+
+    def test_cleanup_dm_subscriptions_for_session(self, temp_registry_db, sample_session_data):
+        """Removes all subscriptions for a session, returns count."""
+        temp_registry_db.create_session(sample_session_data)
+
+        # Create multiple subscriptions
+        temp_registry_db.create_dm_subscription(
+            user_id='U111111',
+            session_id=sample_session_data['session_id'],
+            dm_channel_id='D111111'
+        )
+        temp_registry_db.create_dm_subscription(
+            user_id='U222222',
+            session_id=sample_session_data['session_id'],
+            dm_channel_id='D222222'
+        )
+
+        count = temp_registry_db.cleanup_dm_subscriptions_for_session(sample_session_data['session_id'])
+        assert count == 2
+
+        # All subscriptions should be gone
+        subs = temp_registry_db.get_dm_subscriptions_for_session(sample_session_data['session_id'])
+        assert len(subs) == 0
