@@ -191,14 +191,20 @@ The systemd service:
 
 ### 7. Start a Claude Session
 
+First, create a Slack channel for your project (e.g., `#claude-myproject`) and invite the bot:
+1. In Slack, create a new channel or use an existing one
+2. Invite the bot: `/invite @Claude Code Bot`
+
+Then start Claude:
+
 ```bash
 # Navigate to your project
 cd /path/to/your/project
 
 # Start Claude with Slack integration (recommended: dedicated channel per project)
-claude-slack -c myproject
+claude-slack -c claude-myproject
 
-# Or use thread mode in your default channel
+# Or use thread mode in your default channel (no setup needed)
 claude-slack
 ```
 
@@ -209,17 +215,18 @@ claude-slack
 ### Basic Usage
 
 ```bash
-# Start in a dedicated channel (recommended - top-level messages, no threads)
-claude-slack -c myproject
+# Start in a dedicated Slack channel (recommended)
+# The channel must exist and have the bot invited
+claude-slack -c claude-myproject
 
 # Start with a specific message
-claude-slack -c myproject --print "Help me refactor this code"
+claude-slack -c claude-myproject --print "Help me refactor this code"
 
 # Or use thread mode in default channel (from .env)
 claude-slack
 
 # Send permissions to a separate channel
-claude-slack -c myproject --permissions-channel security-approvals
+claude-slack -c claude-myproject --permissions-channel security-approvals
 ```
 
 ### Interacting via Slack
