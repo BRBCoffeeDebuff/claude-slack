@@ -14,8 +14,8 @@ I've found VibeTunnel + Tailscale super helpful for using Claude Code on the go,
 - **Interactive Permission Buttons**: Approve/deny permissions with one tap
 - **Real-time Todo Updates**: See task progress as Claude works
 - **Rich Session Summaries**: Get completion status, modified files, and stats when sessions end
-- **Multiple Concurrent Sessions**: Each session gets its own Slack thread
-- **Custom Channel Mode**: Dedicated channels for specific projects
+- **Dedicated Project Channels**: Each project gets its own Slack channel with top-level messages (`-c` flag)
+- **Multiple Concurrent Sessions**: Run multiple Claude sessions across different projects
 - **Subagent Support**: Works with Claude's Task tool subagents
 
 ## Architecture
@@ -40,6 +40,8 @@ I've found VibeTunnel + Tailscale super helpful for using Claude Code on the go,
 - **Hooks**: Claude Code hooks that post notifications, responses, and todo updates to Slack
 
 ## Quick Start
+
+> **Note:** Steps 1-6 are **one-time setup**. After that, just run `claude-slack` from any project directory.
 
 ### 1. Prerequisites
 
@@ -193,37 +195,38 @@ The systemd service:
 # Navigate to your project
 cd /path/to/your/project
 
-# Start Claude with Slack integration
-claude-slack
+# Start Claude with Slack integration (recommended: dedicated channel per project)
+claude-slack -c myproject
 
-# Or with a custom channel
-claude-slack -c mychannel
+# Or use thread mode in your default channel
+claude-slack
 ```
+
+> **Tip:** Custom channel mode (`-c`) is recommended. Each project gets its own dedicated Slack channel with top-level messages, making it easier to follow conversations and manage multiple projects.
 
 ## Usage
 
 ### Basic Usage
 
 ```bash
-# Start session with default channel (from .env)
-claude-slack
+# Start in a dedicated channel (recommended - top-level messages, no threads)
+claude-slack -c myproject
 
 # Start with a specific message
-claude-slack --print "Help me refactor this code"
+claude-slack -c myproject --print "Help me refactor this code"
 
-# Start in a dedicated channel (top-level messages, no threads)
-claude-slack --channel projectname
-claude-slack -c projectname
+# Or use thread mode in default channel (from .env)
+claude-slack
 
 # Send permissions to a separate channel
-claude-slack --permissions-channel security-approvals
+claude-slack -c myproject --permissions-channel security-approvals
 ```
 
 ### Interacting via Slack
 
-1. **Thread Mode** (default): Claude creates a thread in your channel. Reply in the thread to send messages to Claude.
+1. **Custom Channel Mode** (`-c`, recommended): Messages are top-level in a dedicated channel. Just type in the channel to send messages to Claude.
 
-2. **Custom Channel Mode** (`-c`): Messages are top-level in a dedicated channel. Just type in the channel.
+2. **Thread Mode**: Claude creates a thread in your default channel. Reply in the thread to send messages to Claude.
 
 3. **Permission Prompts**: When Claude needs permission, you'll see interactive buttons:
    - **Yes** - Approve this action
@@ -395,7 +398,7 @@ The `.gitignore` excludes sensitive files by default.
 
 ## Known Limitations
 
-- One active session per custom channel
+- One active session per custom channel (use different channel names for concurrent project sessions)
 - Buffer detection may fail for very fast parallel subagents
 - Slack message length limits may truncate very long responses
 - Session timeout is 24 hours (configurable in registry cleanup)
