@@ -589,6 +589,7 @@ class SessionRegistry:
                 session_data = {
                     'session_id': session_id,
                     'project': data.get("project", "Unknown"),
+                    'project_dir': data.get("project_dir"),
                     'terminal': data.get("terminal", "Unknown"),
                     'socket_path': data.get("socket_path", ""),
                     'thread_ts': thread_ts,  # Note: create_session expects 'thread_ts' not 'slack_thread_ts'
@@ -632,11 +633,25 @@ class SessionRegistry:
         """
         Create Slack thread for new session (simplified for hooks-based system)
 
+        Args:
+            session_data: Session data dict, may include:
+                - custom_channel: Override channel for this session
+                - description/user_label: Optional description for thread
+
         Returns:
-            {"thread_ts": "...", "channel": "..."}
+            {"slack_thread_ts": "...", "slack_channel": "..."}
         """
         if not self.slack_client:
             raise RuntimeError("Slack client not initialized")
+
+        # Determine which channel to use (custom_channel overrides default)
+        target_channel = session_data.get('custom_channel') or self.slack_channel
+
+        # Normalize channel name (strip # prefix if present)
+        if target_channel.startswith('#'):
+            target_channel = target_channel[1:]
+
+        self._log(f"Creating Slack thread in channel: {target_channel}")
 
         # Get optional description
         description = session_data.get('description') or session_data.get('user_label')
@@ -683,7 +698,7 @@ class SessionRegistry:
             text_fallback += f" - {description}"
 
         response = self.slack_client.chat_postMessage(
-            channel=self.slack_channel,
+            channel=target_channel,
             text=text_fallback,
             blocks=blocks
         )

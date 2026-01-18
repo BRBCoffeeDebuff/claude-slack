@@ -374,16 +374,19 @@ class RegistryClient:
             debug_log(f"Registry communication error: {e}")
             return None
 
-    def register(self, project, terminal, socket_path, description=None):
+    def register(self, project, terminal, socket_path, project_dir=None, description=None, custom_channel=None):
         """Register session with registry and create Slack thread"""
         data = {
             "session_id": self.session_id,
             "project": project,
+            "project_dir": project_dir,
             "terminal": terminal,
             "socket_path": socket_path
         }
         if description:
             data["description"] = description
+        if custom_channel:
+            data["custom_channel"] = custom_channel  # Override default channel
 
         response = self._send_command("REGISTER", data)
 
@@ -401,11 +404,12 @@ class RegistryClient:
 class HybridPTYWrapper:
     """Hybrid PTY wrapper combining input control with hooks output"""
 
-    def __init__(self, session_id, project_dir, claude_args=None, description=None):
+    def __init__(self, session_id, project_dir, claude_args=None, description=None, channel=None):
         self.session_id = session_id
         self.project_dir = project_dir
         self.claude_args = claude_args or []
         self.description = description  # Optional description for Slack thread
+        self.custom_channel = channel   # Optional channel override
 
         # Setup logging
         self.logger = setup_logging(session_id)
@@ -416,6 +420,8 @@ class HybridPTYWrapper:
         self.logger.info(f"Claude args: {claude_args}")
         if description:
             self.logger.info(f"Description: {description}")
+        if channel:
+            self.logger.info(f"Custom channel: {channel}")
         self.logger.info(f"Python version: {sys.version}")
         self.logger.info(f"Working directory: {os.getcwd()}")
 
@@ -575,9 +581,11 @@ class HybridPTYWrapper:
         self.logger.info(f"Sending REGISTER command to registry (will create Slack thread)")
         success = self.registry.register(
             project=os.path.basename(self.project_dir),
+            project_dir=self.project_dir,
             terminal=terminal,
             socket_path=self.socket_path,
-            description=self.description
+            description=self.description,
+            custom_channel=self.custom_channel
         )
 
         if success:
@@ -627,6 +635,7 @@ class HybridPTYWrapper:
                 "data": {
                     "session_id": claude_session_id,
                     "project": os.path.basename(self.project_dir),
+                    "project_dir": self.project_dir,
                     "terminal": os.environ.get("TERM_PROGRAM", "Unknown"),
                     "socket_path": self.socket_path,
                     "thread_ts": self.thread_ts,
@@ -1159,6 +1168,7 @@ def main():
 
     parser.add_argument("--session-id", help="Unique session ID (auto-generated if not provided)")
     parser.add_argument("--description", "-d", help="Optional description for the Slack thread")
+    parser.add_argument("--channel", "-c", help="Slack channel for this session (overrides default)")
     parser.add_argument("--help", "-h", action="store_true", help="Show help message")
 
     # Parse known args, remaining go to Claude
@@ -1180,7 +1190,8 @@ def main():
         session_id=session_id,
         project_dir=project_dir,
         claude_args=claude_args,
-        description=args.description
+        description=args.description,
+        channel=args.channel
     )
 
     # Run wrapper

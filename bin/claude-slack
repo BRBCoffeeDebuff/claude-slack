@@ -25,12 +25,17 @@ NC='\033[0m' # No Color
 
 # Parse arguments
 SESSION_DESCRIPTION=""
+SESSION_CHANNEL=""
 CLAUDE_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         -d|--description)
             SESSION_DESCRIPTION="$2"
+            shift 2
+            ;;
+        -c|--channel)
+            SESSION_CHANNEL="$2"
             shift 2
             ;;
         -h|--help)
@@ -40,12 +45,15 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  -d, --description TEXT  Optional description for the Slack thread"
+            echo "  -c, --channel CHANNEL   Post to a specific Slack channel (overrides default)"
+            echo "                          Can be channel name (#my-channel) or ID (C1234567)"
             echo "  -h, --help              Show this help message"
             echo ""
             echo "Examples:"
             echo "  claude-slack"
             echo "  claude-slack -d \"Working on auth feature\""
-            echo "  claude-slack --description \"Bug fix for issue #123\""
+            echo "  claude-slack -c \"#project-updates\" -d \"Daily standup\""
+            echo "  claude-slack --channel project-channel --description \"Bug fix for issue #123\""
             exit 0
             ;;
         *)
@@ -179,12 +187,20 @@ echo -e "${GREEN}Starting Claude with Slack integration...${NC}"
 if [ -n "$SESSION_DESCRIPTION" ]; then
     echo -e "${BLUE}Description: ${SESSION_DESCRIPTION}${NC}"
 fi
+if [ -n "$SESSION_CHANNEL" ]; then
+    echo -e "${BLUE}Channel: ${SESSION_CHANNEL}${NC}"
+fi
 echo ""
 
-# Pass description and Claude args to the Python wrapper
-cd "$PROJECT_DIR"
+# Build wrapper arguments
+WRAPPER_ARGS=()
 if [ -n "$SESSION_DESCRIPTION" ]; then
-    exec python3 "$CORE_DIR/claude_wrapper_hybrid.py" --description "$SESSION_DESCRIPTION" "${CLAUDE_ARGS[@]}"
-else
-    exec python3 "$CORE_DIR/claude_wrapper_hybrid.py" "${CLAUDE_ARGS[@]}"
+    WRAPPER_ARGS+=("--description" "$SESSION_DESCRIPTION")
 fi
+if [ -n "$SESSION_CHANNEL" ]; then
+    WRAPPER_ARGS+=("--channel" "$SESSION_CHANNEL")
+fi
+
+# Pass description, channel, and Claude args to the Python wrapper
+cd "$PROJECT_DIR"
+exec python3 "$CORE_DIR/claude_wrapper_hybrid.py" "${WRAPPER_ARGS[@]}" "${CLAUDE_ARGS[@]}"

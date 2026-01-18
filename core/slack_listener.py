@@ -418,6 +418,110 @@ def handle_reaction(body, client):
         print(f"⚠️  Could not add confirmation reaction: {e}", file=sys.stderr)
 
 
+@app.action("permission_response_1")
+@app.action("permission_response_2")
+@app.action("permission_response_3")
+def handle_permission_button(ack, body, client):
+    """
+    Handle interactive button clicks for permission prompts.
+
+    When a user clicks a permission button (1, 2, or 3), this handler:
+    1. Acknowledges the button click immediately (required by Slack)
+    2. Extracts the button value (the numeric response)
+    3. Gets the thread_ts for routing to the correct Claude session
+    4. Sends the numeric response to Claude
+    5. Updates the message to show the selection
+
+    The button action_ids are: permission_response_1, permission_response_2, permission_response_3
+    The button values are: "1", "2", "3"
+    """
+    # Acknowledge immediately (Slack requires response within 3 seconds)
+    ack()
+
+    print(f"🔘 Button click event received", file=sys.stderr)
+
+    try:
+        # Extract action info
+        actions = body.get("actions", [])
+        if not actions:
+            print(f"⚠️  No actions in button click body", file=sys.stderr)
+            return
+
+        action = actions[0]
+        response = action.get("value")  # "1", "2", or "3"
+        action_id = action.get("action_id")
+        user_id = body.get("user", {}).get("id")
+        user_name = body.get("user", {}).get("name", "Unknown")
+
+        print(f"🔘 Action: {action_id}, Value: {response}, User: {user_name}", file=sys.stderr)
+
+        # Get message and thread info from the body
+        message = body.get("message", {})
+        channel = body.get("channel", {}).get("id")
+        message_ts = message.get("ts")
+        thread_ts = message.get("thread_ts", message_ts)  # Thread parent or message itself
+
+        print(f"🔘 Channel: {channel}, Thread: {thread_ts}", file=sys.stderr)
+
+        if not response or not thread_ts:
+            print(f"⚠️  Missing response or thread_ts in button click", file=sys.stderr)
+            return
+
+        # Send the numeric response to Claude
+        mode = send_response(response, thread_ts=thread_ts)
+        print(f"🔘 Button '{response}' from {user_name} → sent via {mode}", file=sys.stderr)
+
+        # Update the original message to show the selection
+        try:
+            # Get the original blocks
+            original_blocks = message.get("blocks", [])
+
+            # Find the selected option text from the buttons
+            selected_text = None
+            for block in original_blocks:
+                if block.get("type") == "actions":
+                    for element in block.get("elements", []):
+                        if element.get("value") == response:
+                            selected_text = element.get("text", {}).get("text", f"Option {response}")
+                            break
+
+            # Build updated blocks - remove buttons, add selection confirmation
+            updated_blocks = []
+            for block in original_blocks:
+                if block.get("type") == "actions":
+                    # Replace actions block with selection confirmation
+                    updated_blocks.append({
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"✅ *<@{user_id}> selected:* {selected_text}"
+                        }
+                    })
+                elif block.get("type") == "context" and "Click a button" in str(block):
+                    # Remove the instruction context
+                    continue
+                else:
+                    updated_blocks.append(block)
+
+            # Update the message
+            client.chat_update(
+                channel=channel,
+                ts=message_ts,
+                blocks=updated_blocks,
+                text=f"Permission response: {selected_text}"
+            )
+            print(f"🔘 Message updated to show selection", file=sys.stderr)
+
+        except Exception as e:
+            print(f"⚠️  Could not update message after button click: {e}", file=sys.stderr)
+            # Don't fail the whole operation - the response was already sent
+
+    except Exception as e:
+        print(f"❌ Error handling button click: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+
+
 def main():
     """Start the Slack bot in Socket Mode"""
     print("🚀 Starting Slack bot...")
@@ -452,6 +556,8 @@ def main():
     print("   - Direct messages")
     print("   - Channel messages starting with / or !")
     print("   - Single digit responses (1, 2, 3)")
+    print("   - Emoji reactions (1️⃣ 2️⃣ 3️⃣ 👍 👎)")
+    print("   - Interactive button clicks")
     print("   - Threaded replies (routed to correct session)")
     print("")
     print("   Press Ctrl+C to stop")
