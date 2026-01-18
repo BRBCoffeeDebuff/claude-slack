@@ -298,6 +298,25 @@ When you send a message while attached, you'll see confirmation like:
 - `✅ Sent to Claude` (execute mode)
 - `✅ Sent to Claude [research]` (with mode indicator)
 
+### Global Shortcuts
+
+Instead of DM commands, you can use Slack's global shortcuts (⚡ menu) from anywhere:
+
+| Shortcut | Description |
+|----------|-------------|
+| **Get Sessions** | View all active Claude sessions in a modal |
+| **Attach to Session** | Open session picker modal to subscribe |
+| **Research Mode** | Set mode to read-only exploration |
+| **Plan Mode** | Set mode to design approach |
+| **Execute Mode** | Set mode to implement changes |
+
+To use shortcuts:
+1. Click the ⚡ lightning bolt in Slack's message input
+2. Search for "Claude" or the shortcut name
+3. Select the shortcut
+
+Shortcuts work from any channel or DM - no need to message the bot directly.
+
 ---
 
 ## Command Reference

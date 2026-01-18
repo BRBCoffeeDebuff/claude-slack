@@ -836,6 +836,296 @@ def handle_permission_button(ack, body, client):
         traceback.print_exc(file=sys.stderr)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Shortcut Handlers - Global shortcuts from Slack's ⚡ menu
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.shortcut("get_sessions")
+def handle_get_sessions_shortcut(ack, shortcut, client):
+    """
+    Handle the 'Get Sessions' global shortcut.
+    Shows a modal with a list of active Claude sessions.
+    """
+    ack()
+    user_id = shortcut["user"]["id"]
+    trigger_id = shortcut["trigger_id"]
+
+    print(f"⚡ Shortcut: get_sessions from user {user_id}", file=sys.stderr)
+
+    try:
+        from dm_mode import format_session_list_for_slack, list_active_sessions
+
+        # Get sessions list
+        sessions = list_active_sessions(registry_db) if registry_db else []
+
+        if not sessions:
+            blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "📭 *No active sessions*\n\nStart a Claude session with `claude-slack -c channel-name` first."
+                    }
+                }
+            ]
+        else:
+            blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "*🖥️ Active Claude Sessions*"
+                    }
+                },
+                {"type": "divider"}
+            ]
+
+            for session in sessions:
+                session_id = session['session_id']
+                project = session['project']
+                created = session.get('created_at', '')[:10] if session.get('created_at') else ''
+
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*{project}*\n`{session_id}`\n_Started: {created}_"
+                    }
+                })
+
+            blocks.append({"type": "divider"})
+            blocks.append({
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "💡 Use the *Attach to Session* shortcut to subscribe to output"
+                    }
+                ]
+            })
+
+        # Open modal with sessions list
+        client.views_open(
+            trigger_id=trigger_id,
+            view={
+                "type": "modal",
+                "title": {"type": "plain_text", "text": "Claude Sessions"},
+                "close": {"type": "plain_text", "text": "Close"},
+                "blocks": blocks
+            }
+        )
+
+    except Exception as e:
+        print(f"❌ Error in get_sessions shortcut: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+
+
+@app.shortcut("attach_to_session")
+def handle_attach_shortcut(ack, shortcut, client):
+    """
+    Handle the 'Attach to Session' global shortcut.
+    Opens a modal with a dropdown to select a session.
+    """
+    ack()
+    user_id = shortcut["user"]["id"]
+    trigger_id = shortcut["trigger_id"]
+
+    print(f"⚡ Shortcut: attach_to_session from user {user_id}", file=sys.stderr)
+
+    try:
+        from dm_mode import list_active_sessions
+
+        sessions = list_active_sessions(registry_db) if registry_db else []
+
+        if not sessions:
+            # No sessions available
+            client.views_open(
+                trigger_id=trigger_id,
+                view={
+                    "type": "modal",
+                    "title": {"type": "plain_text", "text": "Attach to Session"},
+                    "close": {"type": "plain_text", "text": "Close"},
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "📭 *No active sessions*\n\nStart a Claude session first with:\n```claude-slack -c channel-name```"
+                            }
+                        }
+                    ]
+                }
+            )
+            return
+
+        # Build session options for dropdown
+        session_options = [
+            {
+                "text": {"type": "plain_text", "text": f"{s['project']} ({s['session_id'][:8]}...)"},
+                "value": s['session_id']
+            }
+            for s in sessions
+        ]
+
+        # Open modal with session picker
+        client.views_open(
+            trigger_id=trigger_id,
+            view={
+                "type": "modal",
+                "callback_id": "attach_session_modal",
+                "title": {"type": "plain_text", "text": "Attach to Session"},
+                "submit": {"type": "plain_text", "text": "Attach"},
+                "close": {"type": "plain_text", "text": "Cancel"},
+                "private_metadata": user_id,
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "Select a session to receive its output in your DMs:"
+                        }
+                    },
+                    {
+                        "type": "input",
+                        "block_id": "session_select_block",
+                        "element": {
+                            "type": "static_select",
+                            "action_id": "session_select",
+                            "placeholder": {"type": "plain_text", "text": "Select a session"},
+                            "options": session_options
+                        },
+                        "label": {"type": "plain_text", "text": "Session"}
+                    },
+                    {
+                        "type": "input",
+                        "block_id": "history_block",
+                        "optional": True,
+                        "element": {
+                            "type": "static_select",
+                            "action_id": "history_select",
+                            "placeholder": {"type": "plain_text", "text": "No history"},
+                            "options": [
+                                {"text": {"type": "plain_text", "text": "No history"}, "value": "0"},
+                                {"text": {"type": "plain_text", "text": "Last 5 messages"}, "value": "5"},
+                                {"text": {"type": "plain_text", "text": "Last 10 messages"}, "value": "10"},
+                                {"text": {"type": "plain_text", "text": "Last 25 messages"}, "value": "25"}
+                            ]
+                        },
+                        "label": {"type": "plain_text", "text": "Fetch recent history?"}
+                    }
+                ]
+            }
+        )
+
+    except Exception as e:
+        print(f"❌ Error in attach_to_session shortcut: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+
+
+@app.view("attach_session_modal")
+def handle_attach_modal_submission(ack, body, client, view):
+    """Handle submission of the attach session modal."""
+    ack()
+
+    user_id = body["user"]["id"]
+    values = view["state"]["values"]
+
+    # Extract selected session
+    session_id = values["session_select_block"]["session_select"]["selected_option"]["value"]
+
+    # Extract history count (optional)
+    history_selection = values.get("history_block", {}).get("history_select", {}).get("selected_option")
+    history_count = int(history_selection["value"]) if history_selection else 0
+
+    print(f"⚡ Modal submit: attach {user_id} to {session_id} (history: {history_count})", file=sys.stderr)
+
+    try:
+        from dm_mode import attach_to_session
+
+        # Open a DM channel with the user
+        dm_response = client.conversations_open(users=[user_id])
+        dm_channel_id = dm_response["channel"]["id"]
+
+        # Attach to session
+        result = attach_to_session(
+            registry_db, user_id, session_id, dm_channel_id, client, history_count
+        )
+
+        # Send confirmation to user's DM
+        client.chat_postMessage(
+            channel=dm_channel_id,
+            text=result['message']
+        )
+
+    except Exception as e:
+        print(f"❌ Error attaching to session: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+
+
+@app.shortcut("research_mode")
+def handle_research_mode_shortcut(ack, shortcut, client):
+    """Handle the 'Research Mode' global shortcut."""
+    ack()
+    user_id = shortcut["user"]["id"]
+
+    print(f"⚡ Shortcut: research_mode from user {user_id}", file=sys.stderr)
+    _set_user_mode(user_id, "research", client)
+
+
+@app.shortcut("plan_mode")
+def handle_plan_mode_shortcut(ack, shortcut, client):
+    """Handle the 'Plan Mode' global shortcut."""
+    ack()
+    user_id = shortcut["user"]["id"]
+
+    print(f"⚡ Shortcut: plan_mode from user {user_id}", file=sys.stderr)
+    _set_user_mode(user_id, "plan", client)
+
+
+@app.shortcut("execute_mode")
+def handle_execute_mode_shortcut(ack, shortcut, client):
+    """Handle the 'Execute Mode' global shortcut."""
+    ack()
+    user_id = shortcut["user"]["id"]
+
+    print(f"⚡ Shortcut: execute_mode from user {user_id}", file=sys.stderr)
+    _set_user_mode(user_id, "execute", client)
+
+
+def _set_user_mode(user_id: str, mode: str, client):
+    """
+    Helper to set user mode and send confirmation via DM.
+
+    Args:
+        user_id: Slack user ID
+        mode: Mode to set (research, plan, execute)
+        client: Slack WebClient
+    """
+    try:
+        from dm_mode import handle_mode_command
+
+        result = handle_mode_command(registry_db, user_id, action='set', mode=mode)
+
+        # Open DM and send confirmation
+        dm_response = client.conversations_open(users=[user_id])
+        dm_channel_id = dm_response["channel"]["id"]
+
+        client.chat_postMessage(
+            channel=dm_channel_id,
+            text=result['message']
+        )
+
+        print(f"✅ Set mode to {mode} for user {user_id}", file=sys.stderr)
+
+    except Exception as e:
+        print(f"❌ Error setting mode: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+
+
 def main():
     """Start the Slack bot in Socket Mode"""
     # Check if app initialization failed (deferred from module load)
@@ -879,6 +1169,9 @@ def main():
     print("   - Emoji reactions (1️⃣ 2️⃣ 3️⃣ 👍 👎)")
     print("   - Interactive button clicks")
     print("   - Threaded replies (routed to correct session)")
+    print("   - Global shortcuts (⚡ menu)")
+    print("")
+    print("   Shortcuts: Get Sessions, Attach to Session, Research/Plan/Execute Mode")
     print("")
     print("   Press Ctrl+C to stop")
     print("")
