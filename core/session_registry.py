@@ -164,7 +164,16 @@ class SessionRegistry:
     def _log(self, message: str):
         """Log message with timestamp"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[Registry {timestamp}] {message}", file=sys.stderr)
+        log_line = f"[Registry {timestamp}] {message}"
+        print(log_line, file=sys.stderr)
+        # Also write to file for debugging
+        log_file = os.path.expanduser("~/.claude/slack/logs/session_registry.log")
+        try:
+            with open(log_file, "a") as f:
+                f.write(log_line + "\n")
+                f.flush()
+        except Exception:
+            pass
 
     def register_session(self, session_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -210,6 +219,8 @@ class SessionRegistry:
             def create_thread_async():
                 try:
                     self._log(f"[Async] Creating Slack thread for {session_id}")
+                    self._log(f"[Async] session_data keys: {list(session_data.keys())}")
+                    self._log(f"[Async] custom_channel in session_data: {session_data.get('custom_channel')}")
                     thread_data = self._create_slack_thread(session_data)
 
                     # Update session with thread info (atomic database update)
@@ -575,15 +586,16 @@ class SessionRegistry:
                 return {"success": True, "session": session}
 
             elif command == "REGISTER_EXISTING":
-                # Register a new session ID pointing to an existing Slack thread
-                # Used to register Claude's UUID with the same thread as the wrapper
+                # Register a new session ID pointing to an existing Slack channel/thread
+                # Used to register Claude's UUID with the same Slack metadata as the wrapper
                 self._log(f"Processing REGISTER_EXISTING command for {data.get('session_id', 'unknown')}")
                 session_id = data.get("session_id")
-                thread_ts = data.get("thread_ts")
+                thread_ts = data.get("thread_ts")  # May be None for custom channel mode
                 channel = data.get("channel")
 
-                if not session_id or not thread_ts or not channel:
-                    return {"success": False, "error": "Missing required fields: session_id, thread_ts, channel"}
+                # Only require session_id and channel (thread_ts can be None for custom channels)
+                if not session_id or not channel:
+                    return {"success": False, "error": "Missing required fields: session_id, channel"}
 
                 # Create session with existing Slack metadata
                 session_data = {
@@ -592,12 +604,12 @@ class SessionRegistry:
                     'project_dir': data.get("project_dir"),
                     'terminal': data.get("terminal", "Unknown"),
                     'socket_path': data.get("socket_path", ""),
-                    'thread_ts': thread_ts,  # Note: create_session expects 'thread_ts' not 'slack_thread_ts'
-                    'channel': channel,       # Note: create_session expects 'channel' not 'slack_channel'
+                    'thread_ts': thread_ts,  # May be None for custom channel mode
+                    'channel': channel,
                     'slack_user_id': data.get("slack_user_id")
                 }
                 session = self.db.create_session(session_data)
-                self._log(f"REGISTER_EXISTING completed for {session_id} -> thread {thread_ts}")
+                self._log(f"REGISTER_EXISTING completed for {session_id} -> channel {channel}, thread {thread_ts}")
                 return {"success": True, "session": session}
 
             elif command == "UNREGISTER":

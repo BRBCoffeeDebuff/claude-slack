@@ -619,8 +619,9 @@ class HybridPTYWrapper:
         self.logger.info(f"Attempting to register Claude session ID: {claude_session_id}")
         self.logger.debug(f"Registry available: {self.registry.available}, thread_ts: {self.thread_ts}, channel: {self.channel}")
 
-        if not self.registry.available or not self.thread_ts:
-            self.logger.warning(f"Cannot register Claude session - registry: {self.registry.available}, thread_ts: {self.thread_ts}")
+        # Need at least a channel to register (thread_ts can be None for custom channel mode)
+        if not self.registry.available or not self.channel:
+            self.logger.warning(f"Cannot register Claude session - registry: {self.registry.available}, channel: {self.channel}")
             return False
 
         self.logger.info(f"Registering Claude session ID: {claude_session_id}")
@@ -1030,17 +1031,18 @@ class HybridPTYWrapper:
             else:  # Parent process
                 self.logger.info(f"PTY forked successfully - PID: {pid}, master_fd: {self.master_fd}")
 
-                # Wait for async Slack thread creation to complete
+                # Wait for async Slack thread/channel setup to complete
                 # The REGISTER command creates the thread asynchronously, so we need to
-                # wait for thread_ts and channel to be populated in the database
-                if self.registry.available and not self.thread_ts:
-                    self.logger.info("Waiting for async Slack thread creation...")
+                # wait for channel to be populated in the database
+                # Note: thread_ts may be None for custom channel mode (top-level messages)
+                if self.registry.available and not self.channel:
+                    self.logger.info("Waiting for async Slack channel setup...")
                     max_wait = 10  # seconds
                     start_time = time.time()
 
                     while time.time() - start_time < max_wait:
                         try:
-                            # Query the database directly to check if thread was created
+                            # Query the database directly to check if channel was set
                             import sqlite3
                             db_path = os.environ.get("REGISTRY_DB_PATH", os.path.expanduser("~/.claude/slack/registry.db"))
                             conn = sqlite3.connect(db_path)
@@ -1052,18 +1054,22 @@ class HybridPTYWrapper:
                             row = cursor.fetchone()
                             conn.close()
 
-                            if row and row[0] and row[1]:
-                                self.thread_ts = row[0]
+                            # Only require channel to be set (thread_ts can be None for custom channels)
+                            if row and row[1]:
+                                self.thread_ts = row[0]  # May be None for custom channel mode
                                 self.channel = row[1]
-                                self.logger.info(f"Slack thread created: {self.thread_ts} in {self.channel}")
+                                if self.thread_ts:
+                                    self.logger.info(f"Slack thread created: {self.thread_ts} in {self.channel}")
+                                else:
+                                    self.logger.info(f"Slack channel set (top-level mode): {self.channel}")
                                 break
                         except Exception as e:
-                            self.logger.debug(f"Error checking thread status: {e}")
+                            self.logger.debug(f"Error checking channel status: {e}")
 
                         time.sleep(0.5)
 
-                    if not self.thread_ts:
-                        self.logger.warning("Timeout waiting for Slack thread creation")
+                    if not self.channel:
+                        self.logger.warning("Timeout waiting for Slack channel setup")
 
                 # Use the Claude session ID we explicitly set with --session-id
                 # This ensures we register the correct session, not some other active session
