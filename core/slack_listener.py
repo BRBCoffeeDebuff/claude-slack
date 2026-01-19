@@ -94,6 +94,10 @@ except KeyError:
             return lambda f: f
         def message(self, *args, **kwargs):
             return lambda f: f
+        def shortcut(self, *args, **kwargs):
+            return lambda f: f
+        def view(self, *args, **kwargs):
+            return lambda f: f
     app = _DummyApp()
 
 
