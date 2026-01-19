@@ -78,6 +78,54 @@ class UserPreference(Base):
         }
 
 
+class AskUserQuestion(Base):
+    """
+    Pending AskUserQuestion prompts waiting for user response.
+
+    When Claude uses the AskUserQuestion tool, the hook posts to Slack
+    and stores the question here. The Slack listener writes the answer
+    when the user responds via emoji reaction or thread reply.
+
+    Unlike permission requests, these are non-blocking - the hook exits
+    immediately and the answer is delivered via socket when ready.
+    """
+    __tablename__ = 'askuser_questions'
+
+    id = Column(String(50), primary_key=True)  # UUID
+    session_id = Column(String(50), nullable=False, index=True)
+    request_id = Column(String(50), nullable=False, unique=True)  # Unique per request
+    question_data = Column(String, nullable=False)  # JSON blob of questions array
+    status = Column(String(20), nullable=False, default='pending')  # pending/answered/expired
+    answer_data = Column(String, nullable=True)  # JSON blob of answers
+    slack_channel = Column(String(50), nullable=True)
+    slack_message_ts = Column(String(50), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    answered_at = Column(DateTime, nullable=True)
+
+    # Valid statuses
+    VALID_STATUSES = {'pending', 'answered', 'expired'}
+
+    __table_args__ = (
+        Index('idx_askuser_session', 'session_id'),
+        Index('idx_askuser_status', 'status'),
+    )
+
+    def to_dict(self):
+        """Convert to dictionary for JSON serialization"""
+        return {
+            'id': self.id,
+            'session_id': self.session_id,
+            'request_id': self.request_id,
+            'question_data': self.question_data,
+            'status': self.status,
+            'answer_data': self.answer_data,
+            'slack_channel': self.slack_channel,
+            'slack_message_ts': self.slack_message_ts,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'answered_at': self.answered_at.isoformat() if self.answered_at else None,
+        }
+
+
 class SessionRecord(Base):
     """
     Registry entry for a Claude Code session
@@ -259,6 +307,28 @@ class RegistryDatabase:
                         updated_at DATETIME NOT NULL
                     )
                 """))
+                conn.commit()
+
+            # Create askuser_questions table if not exists
+            result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='askuser_questions'"))
+            if not result.fetchone():
+                print(f"[Migration] Creating askuser_questions table", flush=True)
+                conn.execute(text("""
+                    CREATE TABLE askuser_questions (
+                        id VARCHAR(50) PRIMARY KEY,
+                        session_id VARCHAR(50) NOT NULL,
+                        request_id VARCHAR(50) NOT NULL UNIQUE,
+                        question_data TEXT NOT NULL,
+                        status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                        answer_data TEXT,
+                        slack_channel VARCHAR(50),
+                        slack_message_ts VARCHAR(50),
+                        created_at DATETIME NOT NULL,
+                        answered_at DATETIME
+                    )
+                """))
+                conn.execute(text("CREATE INDEX idx_askuser_session ON askuser_questions(session_id)"))
+                conn.execute(text("CREATE INDEX idx_askuser_status ON askuser_questions(status)"))
                 conn.commit()
 
     @contextmanager
@@ -546,6 +616,189 @@ class RegistryDatabase:
         """
         pref = self.get_user_preference(user_id)
         return pref['mode'] if pref else 'execute'
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # AskUserQuestion Methods
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def create_askuser_question(
+        self,
+        session_id: str,
+        request_id: str,
+        question_data: str,
+        slack_channel: str = None,
+        slack_message_ts: str = None
+    ) -> dict:
+        """
+        Create a new AskUserQuestion record.
+
+        Called by the PreToolUse hook after posting the question to Slack.
+
+        Args:
+            session_id: Claude session ID
+            request_id: Unique request ID for this question
+            question_data: JSON string of questions array
+            slack_channel: Slack channel where question was posted
+            slack_message_ts: Slack message timestamp
+
+        Returns:
+            Dict with question data
+        """
+        with self.session_scope() as session:
+            question = AskUserQuestion(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                request_id=request_id,
+                question_data=question_data,
+                status='pending',
+                slack_channel=slack_channel,
+                slack_message_ts=slack_message_ts,
+                created_at=datetime.now()
+            )
+            session.add(question)
+            session.flush()
+            return question.to_dict()
+
+    def get_askuser_question(self, request_id: str) -> dict:
+        """
+        Get an AskUserQuestion by request_id.
+
+        Args:
+            request_id: Unique request ID
+
+        Returns:
+            Question dict or None if not found
+        """
+        with self.session_scope() as session:
+            question = session.query(AskUserQuestion).filter_by(request_id=request_id).first()
+            return question.to_dict() if question else None
+
+    def get_askuser_question_by_message(self, slack_channel: str, slack_message_ts: str) -> dict:
+        """
+        Get an AskUserQuestion by Slack message location.
+
+        Used by the Slack listener when handling reactions/replies.
+
+        Args:
+            slack_channel: Slack channel ID
+            slack_message_ts: Slack message timestamp
+
+        Returns:
+            Question dict or None if not found
+        """
+        with self.session_scope() as session:
+            question = session.query(AskUserQuestion).filter_by(
+                slack_channel=slack_channel,
+                slack_message_ts=slack_message_ts
+            ).first()
+            return question.to_dict() if question else None
+
+    def get_pending_askuser_questions(self, session_id: str) -> list:
+        """
+        Get all pending AskUserQuestions for a session.
+
+        Args:
+            session_id: Claude session ID
+
+        Returns:
+            List of question dicts
+        """
+        with self.session_scope() as session:
+            questions = session.query(AskUserQuestion).filter_by(
+                session_id=session_id,
+                status='pending'
+            ).order_by(AskUserQuestion.created_at.asc()).all()
+            return [q.to_dict() for q in questions]
+
+    def answer_askuser_question(self, request_id: str, answer_data: str) -> bool:
+        """
+        Record an answer for an AskUserQuestion.
+
+        Called by the Slack listener when user responds via reaction/reply.
+
+        Args:
+            request_id: Unique request ID
+            answer_data: JSON string of answers
+
+        Returns:
+            True if question was found and updated, False otherwise
+        """
+        with self.session_scope() as session:
+            question = session.query(AskUserQuestion).filter_by(request_id=request_id).first()
+            if not question:
+                return False
+            question.answer_data = answer_data
+            question.status = 'answered'
+            question.answered_at = datetime.now()
+            return True
+
+    def expire_askuser_question(self, request_id: str) -> bool:
+        """
+        Mark an AskUserQuestion as expired.
+
+        Called when the question times out or session ends.
+
+        Args:
+            request_id: Unique request ID
+
+        Returns:
+            True if question was found and updated, False otherwise
+        """
+        with self.session_scope() as session:
+            question = session.query(AskUserQuestion).filter_by(request_id=request_id).first()
+            if not question:
+                return False
+            question.status = 'expired'
+            return True
+
+    def delete_askuser_question(self, request_id: str) -> bool:
+        """
+        Delete an AskUserQuestion record.
+
+        Args:
+            request_id: Unique request ID
+
+        Returns:
+            True if question was found and deleted, False otherwise
+        """
+        with self.session_scope() as session:
+            question = session.query(AskUserQuestion).filter_by(request_id=request_id).first()
+            if not question:
+                return False
+            session.delete(question)
+            return True
+
+    def cleanup_old_askuser_questions(self, older_than_hours: int = 24) -> int:
+        """
+        Delete old AskUserQuestions (answered or expired).
+
+        Args:
+            older_than_hours: Delete questions older than this many hours
+
+        Returns:
+            Number of questions deleted
+        """
+        cutoff = datetime.now() - timedelta(hours=older_than_hours)
+        with self.session_scope() as session:
+            count = session.query(AskUserQuestion).filter(
+                AskUserQuestion.created_at < cutoff,
+                AskUserQuestion.status.in_(['answered', 'expired'])
+            ).delete(synchronize_session=False)
+            return count
+
+    def cleanup_askuser_questions_for_session(self, session_id: str) -> int:
+        """
+        Delete all AskUserQuestions for a session (when session ends).
+
+        Args:
+            session_id: Claude session ID
+
+        Returns:
+            Number of questions deleted
+        """
+        with self.session_scope() as session:
+            count = session.query(AskUserQuestion).filter_by(session_id=session_id).delete()
+            return count
 
 
 from datetime import timedelta

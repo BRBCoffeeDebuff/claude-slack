@@ -503,6 +503,139 @@ def registry_get_command():
 
 
 # ============================================================
+# AskUserQuestion Fixtures
+# ============================================================
+
+@pytest.fixture
+def temp_response_dir(tmp_path):
+    """Create temporary response directory for AskUserQuestion."""
+    response_dir = tmp_path / "askuser_responses"
+    response_dir.mkdir()
+    return response_dir
+
+
+@pytest.fixture
+def temp_log_dir(tmp_path):
+    """Create temporary log directory."""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    return log_dir
+
+
+@pytest.fixture
+def sample_askuser_hook_input():
+    """Sample AskUserQuestion hook input."""
+    return {
+        'session_id': 'test-session-e2e',
+        'transcript_path': '/path/to/transcript.jsonl',
+        'cwd': '/test/project',
+        'permission_mode': 'default',
+        'hook_event_name': 'PreToolUse',
+        'tool_name': 'AskUserQuestion',
+        'tool_input': {
+            'questions': [
+                {
+                    'question': 'Which database should we use?',
+                    'header': 'Database',
+                    'multiSelect': False,
+                    'options': [
+                        {'label': 'PostgreSQL', 'description': 'Relational, ACID compliant'},
+                        {'label': 'MongoDB', 'description': 'Document store, flexible schema'},
+                        {'label': 'Redis', 'description': 'In-memory, key-value store'}
+                    ]
+                }
+            ]
+        }
+    }
+
+
+@pytest.fixture
+def sample_multiselect_hook_input():
+    """Sample multi-select AskUserQuestion hook input."""
+    return {
+        'session_id': 'test-session-e2e',
+        'transcript_path': '/path/to/transcript.jsonl',
+        'cwd': '/test/project',
+        'permission_mode': 'default',
+        'hook_event_name': 'PreToolUse',
+        'tool_name': 'AskUserQuestion',
+        'tool_input': {
+            'questions': [
+                {
+                    'question': 'Which features should we enable?',
+                    'header': 'Features',
+                    'multiSelect': True,
+                    'options': [
+                        {'label': 'Logging', 'description': 'Enable debug logging'},
+                        {'label': 'Caching', 'description': 'Enable response caching'},
+                        {'label': 'Metrics', 'description': 'Enable performance metrics'}
+                    ]
+                }
+            ]
+        }
+    }
+
+
+@pytest.fixture
+def sample_multi_question_hook_input():
+    """Sample multi-question AskUserQuestion hook input."""
+    return {
+        'session_id': 'test-session-e2e',
+        'transcript_path': '/path/to/transcript.jsonl',
+        'cwd': '/test/project',
+        'permission_mode': 'default',
+        'hook_event_name': 'PreToolUse',
+        'tool_name': 'AskUserQuestion',
+        'tool_input': {
+            'questions': [
+                {
+                    'question': 'Which framework?',
+                    'header': 'Framework',
+                    'multiSelect': False,
+                    'options': [
+                        {'label': 'FastAPI', 'description': 'Modern Python web framework'},
+                        {'label': 'Flask', 'description': 'Lightweight Python framework'}
+                    ]
+                },
+                {
+                    'question': 'Which database?',
+                    'header': 'Database',
+                    'multiSelect': False,
+                    'options': [
+                        {'label': 'PostgreSQL', 'description': 'SQL database'},
+                        {'label': 'MongoDB', 'description': 'NoSQL database'}
+                    ]
+                }
+            ]
+        }
+    }
+
+
+@pytest.fixture
+def sample_askuser_reaction_body():
+    """Sample reaction event body for AskUserQuestion."""
+    return {
+        'event': {
+            'type': 'reaction_added',
+            'user': 'U123456',
+            'reaction': 'one',  # 1️⃣
+            'item': {
+                'type': 'message',
+                'channel': 'C123456',
+                'ts': '1234567890.123456'
+            },
+            'event_ts': '1234567890.123457'
+        }
+    }
+
+
+@pytest.fixture
+def mock_ack():
+    """Mock Slack ack function."""
+    return MagicMock()
+
+
+# ============================================================
 # Slack Event Fixtures
 # ============================================================
 

@@ -17,7 +17,7 @@ import pytest
 # Add core directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "core"))
 
-from registry_db import RegistryDatabase, SessionRecord, DMSubscription, Base
+from registry_db import RegistryDatabase, SessionRecord, DMSubscription, AskUserQuestion, Base
 
 
 class TestRegistryDatabaseInit:
@@ -555,3 +555,314 @@ class TestDMSubscriptions:
         # All subscriptions should be gone
         subs = temp_registry_db.get_dm_subscriptions_for_session(sample_session_data['session_id'])
         assert len(subs) == 0
+
+
+class TestAskUserQuestionCreate:
+    """Tests for create_askuser_question()"""
+
+    def test_create_askuser_question_basic(self, temp_registry_db, sample_session_data):
+        """Creates a new AskUserQuestion record."""
+        temp_registry_db.create_session(sample_session_data)
+
+        result = temp_registry_db.create_askuser_question(
+            session_id=sample_session_data['session_id'],
+            request_id='req-123',
+            question_data='{"questions": []}',
+        )
+
+        assert result['session_id'] == sample_session_data['session_id']
+        assert result['request_id'] == 'req-123'
+        assert result['status'] == 'pending'
+        assert result['question_data'] == '{"questions": []}'
+        assert result['id'] is not None
+        assert result['created_at'] is not None
+        assert result['answer_data'] is None
+        assert result['answered_at'] is None
+
+    def test_create_askuser_question_with_slack_info(self, temp_registry_db, sample_session_data):
+        """Creates AskUserQuestion with Slack channel and message ts."""
+        temp_registry_db.create_session(sample_session_data)
+
+        result = temp_registry_db.create_askuser_question(
+            session_id=sample_session_data['session_id'],
+            request_id='req-456',
+            question_data='{"questions": [{"question": "Test?"}]}',
+            slack_channel='C123456',
+            slack_message_ts='1234567890.123456'
+        )
+
+        assert result['slack_channel'] == 'C123456'
+        assert result['slack_message_ts'] == '1234567890.123456'
+
+    def test_create_askuser_question_unique_request_id(self, temp_registry_db, sample_session_data):
+        """request_id must be unique."""
+        temp_registry_db.create_session(sample_session_data)
+
+        temp_registry_db.create_askuser_question(
+            session_id=sample_session_data['session_id'],
+            request_id='unique-req',
+            question_data='{}',
+        )
+
+        # Duplicate should raise
+        with pytest.raises(Exception):  # IntegrityError
+            temp_registry_db.create_askuser_question(
+                session_id=sample_session_data['session_id'],
+                request_id='unique-req',
+                question_data='{}',
+            )
+
+
+class TestAskUserQuestionGet:
+    """Tests for get_askuser_question() and related getters."""
+
+    def test_get_askuser_question_exists(self, temp_registry_db, sample_session_data):
+        """Retrieves existing question by request_id."""
+        temp_registry_db.create_session(sample_session_data)
+        temp_registry_db.create_askuser_question(
+            session_id=sample_session_data['session_id'],
+            request_id='get-req-123',
+            question_data='{"q": 1}',
+        )
+
+        result = temp_registry_db.get_askuser_question('get-req-123')
+        assert result is not None
+        assert result['request_id'] == 'get-req-123'
+
+    def test_get_askuser_question_not_found(self, temp_registry_db):
+        """Returns None for non-existent request_id."""
+        result = temp_registry_db.get_askuser_question('nonexistent')
+        assert result is None
+
+    def test_get_askuser_question_by_message(self, temp_registry_db, sample_session_data):
+        """Finds question by Slack channel and message ts."""
+        temp_registry_db.create_session(sample_session_data)
+        temp_registry_db.create_askuser_question(
+            session_id=sample_session_data['session_id'],
+            request_id='msg-req-123',
+            question_data='{}',
+            slack_channel='C999999',
+            slack_message_ts='9999999999.999999'
+        )
+
+        result = temp_registry_db.get_askuser_question_by_message(
+            slack_channel='C999999',
+            slack_message_ts='9999999999.999999'
+        )
+        assert result is not None
+        assert result['request_id'] == 'msg-req-123'
+
+    def test_get_askuser_question_by_message_not_found(self, temp_registry_db):
+        """Returns None when message not found."""
+        result = temp_registry_db.get_askuser_question_by_message(
+            slack_channel='CNOTFOUND',
+            slack_message_ts='0000000000.000000'
+        )
+        assert result is None
+
+    def test_get_pending_askuser_questions(self, temp_registry_db, sample_session_data):
+        """Returns only pending questions for session, ordered by created_at."""
+        temp_registry_db.create_session(sample_session_data)
+
+        # Create 3 questions
+        temp_registry_db.create_askuser_question(
+            session_id=sample_session_data['session_id'],
+            request_id='pending-1',
+            question_data='{}',
+        )
+        time.sleep(0.01)
+        temp_registry_db.create_askuser_question(
+            session_id=sample_session_data['session_id'],
+            request_id='pending-2',
+            question_data='{}',
+        )
+        time.sleep(0.01)
+        temp_registry_db.create_askuser_question(
+            session_id=sample_session_data['session_id'],
+            request_id='answered-1',
+            question_data='{}',
+        )
+
+        # Answer one
+        temp_registry_db.answer_askuser_question('answered-1', '{"answer": "test"}')
+
+        pending = temp_registry_db.get_pending_askuser_questions(sample_session_data['session_id'])
+        assert len(pending) == 2
+        assert pending[0]['request_id'] == 'pending-1'  # Ordered by created_at
+        assert pending[1]['request_id'] == 'pending-2'
+
+
+class TestAskUserQuestionAnswer:
+    """Tests for answer_askuser_question()"""
+
+    def test_answer_askuser_question_success(self, temp_registry_db, sample_session_data):
+        """Updates question with answer and marks as answered."""
+        temp_registry_db.create_session(sample_session_data)
+        temp_registry_db.create_askuser_question(
+            session_id=sample_session_data['session_id'],
+            request_id='answer-req-123',
+            question_data='{}',
+        )
+
+        result = temp_registry_db.answer_askuser_question(
+            'answer-req-123',
+            '{"question_0": "Option A"}'
+        )
+        assert result is True
+
+        # Verify updated
+        question = temp_registry_db.get_askuser_question('answer-req-123')
+        assert question['status'] == 'answered'
+        assert question['answer_data'] == '{"question_0": "Option A"}'
+        assert question['answered_at'] is not None
+
+    def test_answer_askuser_question_not_found(self, temp_registry_db):
+        """Returns False for non-existent request_id."""
+        result = temp_registry_db.answer_askuser_question('nonexistent', '{}')
+        assert result is False
+
+
+class TestAskUserQuestionExpire:
+    """Tests for expire_askuser_question()"""
+
+    def test_expire_askuser_question_success(self, temp_registry_db, sample_session_data):
+        """Marks question as expired."""
+        temp_registry_db.create_session(sample_session_data)
+        temp_registry_db.create_askuser_question(
+            session_id=sample_session_data['session_id'],
+            request_id='expire-req-123',
+            question_data='{}',
+        )
+
+        result = temp_registry_db.expire_askuser_question('expire-req-123')
+        assert result is True
+
+        question = temp_registry_db.get_askuser_question('expire-req-123')
+        assert question['status'] == 'expired'
+
+    def test_expire_askuser_question_not_found(self, temp_registry_db):
+        """Returns False for non-existent request_id."""
+        result = temp_registry_db.expire_askuser_question('nonexistent')
+        assert result is False
+
+
+class TestAskUserQuestionDelete:
+    """Tests for delete_askuser_question()"""
+
+    def test_delete_askuser_question_success(self, temp_registry_db, sample_session_data):
+        """Deletes question record."""
+        temp_registry_db.create_session(sample_session_data)
+        temp_registry_db.create_askuser_question(
+            session_id=sample_session_data['session_id'],
+            request_id='delete-req-123',
+            question_data='{}',
+        )
+
+        result = temp_registry_db.delete_askuser_question('delete-req-123')
+        assert result is True
+
+        # Verify deleted
+        question = temp_registry_db.get_askuser_question('delete-req-123')
+        assert question is None
+
+    def test_delete_askuser_question_not_found(self, temp_registry_db):
+        """Returns False for non-existent request_id."""
+        result = temp_registry_db.delete_askuser_question('nonexistent')
+        assert result is False
+
+
+class TestAskUserQuestionCleanup:
+    """Tests for cleanup methods."""
+
+    def test_cleanup_old_askuser_questions(self, temp_registry_db, sample_session_data):
+        """Deletes old answered/expired questions."""
+        from registry_db import AskUserQuestion
+
+        temp_registry_db.create_session(sample_session_data)
+
+        # Create old answered question
+        temp_registry_db.create_askuser_question(
+            session_id=sample_session_data['session_id'],
+            request_id='old-answered',
+            question_data='{}',
+        )
+        temp_registry_db.answer_askuser_question('old-answered', '{}')
+
+        # Create old expired question
+        temp_registry_db.create_askuser_question(
+            session_id=sample_session_data['session_id'],
+            request_id='old-expired',
+            question_data='{}',
+        )
+        temp_registry_db.expire_askuser_question('old-expired')
+
+        # Create old pending question (should NOT be deleted)
+        temp_registry_db.create_askuser_question(
+            session_id=sample_session_data['session_id'],
+            request_id='old-pending',
+            question_data='{}',
+        )
+
+        # Manually set created_at to 25 hours ago for all
+        with temp_registry_db.session_scope() as session:
+            questions = session.query(AskUserQuestion).all()
+            for q in questions:
+                q.created_at = datetime.now() - timedelta(hours=25)
+
+        count = temp_registry_db.cleanup_old_askuser_questions(older_than_hours=24)
+        assert count == 2  # Only answered and expired
+
+        # Pending should still exist
+        pending = temp_registry_db.get_askuser_question('old-pending')
+        assert pending is not None
+
+    def test_cleanup_askuser_questions_for_session(self, temp_registry_db, sample_session_data):
+        """Deletes all questions for a session."""
+        temp_registry_db.create_session(sample_session_data)
+
+        # Create multiple questions
+        for i in range(3):
+            temp_registry_db.create_askuser_question(
+                session_id=sample_session_data['session_id'],
+                request_id=f'session-cleanup-{i}',
+                question_data='{}',
+            )
+
+        count = temp_registry_db.cleanup_askuser_questions_for_session(
+            sample_session_data['session_id']
+        )
+        assert count == 3
+
+        # All should be gone
+        pending = temp_registry_db.get_pending_askuser_questions(sample_session_data['session_id'])
+        assert len(pending) == 0
+
+
+class TestAskUserQuestionMigration:
+    """Tests for askuser_questions table migration."""
+
+    def test_migration_creates_askuser_questions_table(self, temp_db_path):
+        """askuser_questions table is created if missing."""
+        from sqlalchemy import text
+
+        db = RegistryDatabase(temp_db_path)
+
+        with db.engine.connect() as conn:
+            result = conn.execute(text(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='askuser_questions'"
+            ))
+            assert result.fetchone() is not None
+
+    def test_migration_creates_askuser_indexes(self, temp_db_path):
+        """Indexes are created for askuser_questions."""
+        from sqlalchemy import text
+
+        db = RegistryDatabase(temp_db_path)
+
+        with db.engine.connect() as conn:
+            result = conn.execute(text(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_askuser_%'"
+            ))
+            indexes = [row[0] for row in result.fetchall()]
+            assert 'idx_askuser_session' in indexes
+            assert 'idx_askuser_status' in indexes

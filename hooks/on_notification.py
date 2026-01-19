@@ -66,6 +66,13 @@ from datetime import datetime
 # Hook version (for auto-updates)
 HOOK_VERSION = "2.4.1"
 
+# Generic permission options fallback
+GENERIC_PERMISSION_OPTIONS = [
+    "Yes, approve this time",
+    "Yes, always allow during this session",
+    "No, deny this request"
+]
+
 # Log directory - use ~/.claude/slack/logs as default
 LOG_DIR = os.environ.get("SLACK_LOG_DIR", os.path.expanduser("~/.claude/slack/logs"))
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -256,6 +263,37 @@ def strip_ansi_codes(text):
     # Remove ANSI escape sequences
     ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
     return ansi_escape.sub('', text)
+
+
+def read_line_log(session_id: str) -> list[str] | None:
+    """
+    Read line log file and return lines, or None if unavailable.
+
+    Args:
+        session_id: Session ID for line log file path
+
+    Returns:
+        List of line strings, or None if file unavailable or unreadable
+    """
+    line_log_path = Path(LOG_DIR) / f"claude_lines_{session_id}.txt"
+    if not line_log_path.exists():
+        debug_log(f"Line log not found: {line_log_path}", "PARSE")
+        return None
+    try:
+        with open(line_log_path) as f:
+            # Lines are stored as "123\tline content"
+            lines = []
+            for line in f:
+                # Strip line number prefix if present
+                if '\t' in line:
+                    lines.append(line.split('\t', 1)[1].rstrip())
+                else:
+                    lines.append(line.rstrip())
+            debug_log(f"Read {len(lines)} lines from line log", "PARSE")
+            return lines
+    except Exception as e:
+        debug_log(f"Error reading line log: {e}", "ERROR")
+        return None
 
 
 def parse_permission_prompt_from_output(output_bytes, session_id):
@@ -870,9 +908,33 @@ def enhance_notification_message(
 
         # For permission prompts, extract tool details and add numbered options
         if notification_type == "permission_prompt" and os.path.exists(transcript_path):
-            debug_log("Permission prompt detected, trying output buffer first", "ENHANCE")
+            debug_log("Permission prompt detected, trying line log first", "ENHANCE")
 
-            # FIRST: Try to get exact permission text from output buffer
+            # Fallback chain: line_log -> byte_buffer -> generic
+            parse_source = None
+            options = None
+            question = None
+
+            # 1. Try line log first
+            lines = read_line_log(session_id)
+            if lines:
+                debug_log(f"Line log available with {len(lines)} lines, parsing...", "PARSE")
+                try:
+                    from permission_parser import parse_permission_from_lines
+                    line_log_result = parse_permission_from_lines(lines)
+                    if line_log_result and line_log_result.get('options'):
+                        parse_source = "line_log"
+                        options = line_log_result['options']
+                        question = line_log_result.get('question')
+                        debug_log(f"Parsed options from line log: {options}", "PARSE")
+                    else:
+                        debug_log("Line log parsing returned no options", "PARSE")
+                except Exception as e:
+                    debug_log(f"Error parsing line log: {e}", "ERROR")
+            else:
+                debug_log("Line log not available, will try byte buffer", "PARSE")
+
+            # 2. Fall back to byte buffer
             exact_options_from_buffer = None
             buffer_file = os.path.join(LOG_DIR, f"claude_output_{session_id}.txt")
 
@@ -884,18 +946,43 @@ def enhance_notification_message(
                     max_retries = 10
                     retry_delay = 0.2  # 200ms between retries
 
+                    # Read timing metadata for race condition analysis
+                    metadata_file = buffer_file.replace('.txt', '.meta')
+                    buffer_write_time = None
+                    if os.path.exists(metadata_file):
+                        try:
+                            with open(metadata_file, 'r') as f:
+                                metadata = json.load(f)
+                                buffer_write_time = metadata.get('buffer_write_time')
+                                debug_log(f"Loaded buffer metadata: write_time={buffer_write_time}", "TIMING")
+                        except Exception as e:
+                            debug_log(f"Failed to load buffer metadata: {e}", "TIMING")
+
                     for attempt in range(max_retries):
                         debug_log(f"Buffer read attempt {attempt + 1}/{max_retries}", "ENHANCE")
+
+                        # Capture read timestamp for timing instrumentation
+                        hook_read_time = time.time()
 
                         with open(buffer_file, 'rb') as f:
                             buffer_content = f.read()
 
                         if buffer_content:
                             debug_log(f"Read output buffer ({len(buffer_content)} bytes)", "ENHANCE")
-                            exact_options_from_buffer = parse_permission_prompt_from_output(buffer_content, session_id)
 
-                            if exact_options_from_buffer:
-                                debug_log(f"SUCCESS: Got exact options from buffer on attempt {attempt + 1}: {exact_options_from_buffer}", "ENHANCE")
+                            # Log timing metrics if metadata available
+                            if buffer_write_time:
+                                delta_ms = (hook_read_time - buffer_write_time) * 1000
+                                debug_log(f"[TIMING] session_id={session_id[:8]} buffer_write={buffer_write_time:.6f} hook_read={hook_read_time:.6f} delta_ms={delta_ms:.2f}", "TIMING")
+
+                            buffer_result = parse_permission_prompt_from_output(buffer_content, session_id)
+
+                            if buffer_result:
+                                exact_options_from_buffer = buffer_result
+                                if not options:  # Only use if line log didn't succeed
+                                    parse_source = "byte_buffer"
+                                    options = buffer_result
+                                debug_log(f"SUCCESS: Got exact options from buffer on attempt {attempt + 1}: {buffer_result}", "ENHANCE")
                                 break  # Success! Exit retry loop
                             else:
                                 debug_log(f"Buffer parsing failed on attempt {attempt + 1}, retrying...", "ENHANCE")
@@ -912,7 +999,15 @@ def enhance_notification_message(
                 except Exception as e:
                     debug_log(f"Error reading buffer: {e}", "ENHANCE")
 
-            # SECOND: Use retry loop to get tool details from transcript
+            # 3. Fall back to generic options
+            if not options:
+                parse_source = "generic"
+                options = GENERIC_PERMISSION_OPTIONS
+
+            # Log metric for analysis
+            debug_log(f"[METRIC] parse_source={parse_source} options_count={len(options)} session_id={session_id}", "PARSE")
+
+            # Use retry loop to get tool details from transcript
             debug_log("Parsing transcript for tool details", "ENHANCE")
             response = retry_parse_transcript(
                 transcript_path,
@@ -960,39 +1055,49 @@ def enhance_notification_message(
                         enhanced += f"\n_Context: {snippet}..._\n"
 
                 # Add numbered response options with EXACT Claude wording
-                # CRITICAL: Only use interactive buttons when we have EXACT options from buffer
+                # CRITICAL: Only use interactive buttons when we have EXACT options from line log or buffer
                 # Using hardcoded/fallback options with buttons is DANGEROUS because the
                 # number of options might not match the CLI, causing wrong responses
-                options_to_use = exact_options_from_buffer or exact_options
-                use_buttons = False  # Only set True for exact buffer match
 
-                if options_to_use:
-                    if exact_options_from_buffer:
-                        debug_log(f"Using EXACT options from OUTPUT BUFFER ({len(options_to_use)} options)", "ENHANCE")
-                        # Clear buffer after successful extraction
-                        try:
-                            with open(buffer_file, 'wb') as f:
-                                pass  # Truncate file
-                            debug_log("Output buffer cleared", "ENHANCE")
-                        except Exception as e:
-                            debug_log(f"Failed to clear buffer: {e}", "ENHANCE")
+                # Use options from fallback chain (line_log -> byte_buffer -> generic)
+                if parse_source == "line_log":
+                    debug_log(f"Using EXACT options from LINE LOG ({len(options)} options)", "ENHANCE")
+                    # ONLY allow interactive buttons when we have exact options from line log
+                    permission_options = options
+                    use_buttons = True
+                    # Add exact options to message
+                    enhanced += "\n**Reply with:**\n"
+                    for i, option in enumerate(options, 1):
+                        enhanced += f"{i}. {option}\n"
+                elif parse_source == "byte_buffer":
+                    debug_log(f"Using EXACT options from OUTPUT BUFFER ({len(options)} options)", "ENHANCE")
+                    # Clear buffer after successful extraction
+                    try:
+                        with open(buffer_file, 'wb') as f:
+                            pass  # Truncate file
+                        debug_log("Output buffer cleared", "ENHANCE")
+                    except Exception as e:
+                        debug_log(f"Failed to clear buffer: {e}", "ENHANCE")
 
-                        # ONLY allow interactive buttons when we have exact buffer options
-                        permission_options = options_to_use
-                        use_buttons = True
-                        # Add exact options from buffer to message
-                        enhanced += "\n**Reply with:**\n"
-                        for i, option in enumerate(options_to_use, 1):
-                            enhanced += f"{i}. {option}\n"
-                    else:
-                        debug_log(f"Buffer parsing failed - not showing hardcoded options (must match CLI exactly)", "ENHANCE")
-                        # SAFETY: Don't show interpreted text - only exact CLI options or nothing
-                        # Add 3 reactions (standard permission prompt count) for quick response
-                        permission_options = ["1", "2", "3"]  # Just for reaction count, not displayed
-                        use_buttons = False
-                        enhanced += "\n**Reply with a number from the terminal prompt**"
+                    # ONLY allow interactive buttons when we have exact buffer options
+                    permission_options = options
+                    use_buttons = True
+                    # Add exact options from buffer to message
+                    enhanced += "\n**Reply with:**\n"
+                    for i, option in enumerate(options, 1):
+                        enhanced += f"{i}. {option}\n"
+                elif parse_source == "generic":
+                    debug_log(f"Using GENERIC fallback options ({len(options)} options)", "ENHANCE")
+                    # SAFETY: Show generic options for user convenience but don't enable buttons
+                    # (buttons would be misleading since we don't know exact CLI options)
+                    permission_options = options
+                    use_buttons = False
+                    # Show generic options in message
+                    enhanced += "\n**Reply with:**\n"
+                    for i, option in enumerate(options, 1):
+                        enhanced += f"{i}. {option}\n"
                 else:
-                    debug_log("WARNING: No exact options found - NO BUTTONS, NO REACTIONS", "ENHANCE")
+                    debug_log("WARNING: No parse_source set - NO BUTTONS, NO REACTIONS", "ENHANCE")
                     # SAFETY: Don't add any reactions - we don't know actual option count
                     permission_options = None
                     use_buttons = False

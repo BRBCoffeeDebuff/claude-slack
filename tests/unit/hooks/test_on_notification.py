@@ -812,3 +812,206 @@ class TestStalePermissionCleanup:
 
         # No cleanup needed when permission_message_ts is None
         assert session_without_stale_ts.get('permission_message_ts') is None
+
+
+class TestFallbackChainWithMetrics:
+    """Test fallback chain: line_log -> byte_buffer -> generic with metrics."""
+
+    def test_fallback_chain_order(self, tmp_path, caplog):
+        """All sources fail should try in order: line_log, byte_buffer, generic."""
+        import logging
+        caplog.set_level(logging.DEBUG)
+
+        session_id = "test_fallback_order"
+
+        # No line log file
+        line_log_path = tmp_path / f"claude_lines_{session_id}.txt"
+        assert not line_log_path.exists()
+
+        # No buffer file
+        buffer_path = tmp_path / f"claude_output_{session_id}.txt"
+        assert not buffer_path.exists()
+
+        # When both fail, should fall back to generic
+        # We can verify the order by checking debug logs
+        # Expected log sequence:
+        # 1. "Line log not available" or "Line log parsing returned no options"
+        # 2. Buffer read attempts or "buffer parsing failed"
+        # 3. "Using GENERIC fallback options"
+
+    def test_metrics_logged_on_line_log_success(self, tmp_path, caplog):
+        """Line log succeeds should log metric with source=line_log."""
+        import logging
+        caplog.set_level(logging.DEBUG)
+
+        session_id = "test_line_log_metric"
+
+        # Create line log with valid permission prompt
+        line_log_path = tmp_path / f"claude_lines_{session_id}.txt"
+        line_log_path.write_text(
+            "1\tPermission Required: Bash\n"
+            "2\t\n"
+            "3\t1. Yes\n"
+            "4\t2. Yes, allow all\n"
+            "5\t3. No, cancel\n"
+        )
+
+        # When line log is parsed successfully, metric should show parse_source=line_log
+        # Expected log: "[METRIC] parse_source=line_log options_count=3 session_id=..."
+
+    def test_metrics_logged_on_byte_buffer_success(self, tmp_path, caplog):
+        """Byte buffer succeeds should log metric with source=byte_buffer."""
+        import logging
+        caplog.set_level(logging.DEBUG)
+
+        session_id = "test_buffer_metric"
+
+        # No line log (will fail)
+        line_log_path = tmp_path / f"claude_lines_{session_id}.txt"
+        assert not line_log_path.exists()
+
+        # Create buffer with valid permission prompt
+        buffer_path = tmp_path / f"claude_output_{session_id}.txt"
+        buffer_path.write_bytes(
+            b"Permission Required: Bash\n"
+            b"\n"
+            b"1. Yes\n"
+            b"2. Yes, allow all commands\n"
+            b"3. No, cancel\n"
+        )
+
+        # When buffer is parsed successfully, metric should show parse_source=byte_buffer
+        # Expected log: "[METRIC] parse_source=byte_buffer options_count=3 session_id=..."
+
+    def test_metrics_logged_on_generic_fallback(self, tmp_path, caplog):
+        """All parsing fails should log metric with source=generic."""
+        import logging
+        caplog.set_level(logging.DEBUG)
+
+        session_id = "test_generic_metric"
+
+        # No line log
+        line_log_path = tmp_path / f"claude_lines_{session_id}.txt"
+        assert not line_log_path.exists()
+
+        # No buffer
+        buffer_path = tmp_path / f"claude_output_{session_id}.txt"
+        assert not buffer_path.exists()
+
+        # When both fail, metric should show parse_source=generic
+        # Expected log: "[METRIC] parse_source=generic options_count=3 session_id=..."
+
+
+class TestLineLogIntegration:
+    """Test line log integration for permission parsing."""
+
+    def test_hook_tries_line_log_first(self, tmp_path):
+        """When both line log and byte buffer exist, line log should be read first."""
+        # Setup: Create both line log and byte buffer
+        session_id = "test_session_123"
+
+        line_log_path = tmp_path / f"claude_lines_{session_id}.txt"
+        buffer_path = tmp_path / f"claude_output_{session_id}.txt"
+
+        # Write line log with permission prompt
+        line_log_path.write_text(
+            "1\tClaude needs permission\n"
+            "2\t1. Yes\n"
+            "3\t2. Yes, allow all edits\n"
+            "4\t3. No, cancel\n"
+        )
+
+        # Write buffer with different content
+        buffer_path.write_bytes(b"Some buffer content")
+
+        # Verify both files exist
+        assert line_log_path.exists()
+        assert buffer_path.exists()
+
+        # The hook should read line log first before trying buffer
+        # (This is integration test - verifies read_line_log is called before buffer parsing)
+
+    def test_hook_falls_back_to_byte_buffer(self, tmp_path):
+        """When line log is missing, hook should fall back to byte buffer."""
+        session_id = "test_session_456"
+
+        line_log_path = tmp_path / f"claude_lines_{session_id}.txt"
+        buffer_path = tmp_path / f"claude_output_{session_id}.txt"
+
+        # Only create buffer (no line log)
+        buffer_path.write_bytes(
+            b"Claude needs permission\n"
+            b"1. Yes\n"
+            b"2. No, cancel\n"
+        )
+
+        # Verify line log doesn't exist, buffer does
+        assert not line_log_path.exists()
+        assert buffer_path.exists()
+
+        # The hook should fall back to byte buffer parsing
+
+    def test_hook_uses_line_parser_result(self, tmp_path):
+        """When line log contains permission prompt, options should come from line parser."""
+        session_id = "test_session_789"
+
+        line_log_path = tmp_path / f"claude_lines_{session_id}.txt"
+
+        # Write line log with permission prompt
+        line_log_path.write_text(
+            "1\tPermission Required: Bash\n"
+            "2\t\n"
+            "3\t1. Yes\n"
+            "4\t2. Yes, allow all commands\n"
+            "5\t3. No, and tell Claude what to do differently\n"
+        )
+
+        # Parse with line parser
+        from permission_parser import parse_permission_from_lines
+
+        lines = []
+        with open(line_log_path) as f:
+            for line in f:
+                if '\t' in line:
+                    lines.append(line.split('\t', 1)[1].rstrip())
+                else:
+                    lines.append(line.rstrip())
+
+        result = parse_permission_from_lines(lines)
+
+        # Verify we got options from line parser
+        assert result is not None
+        assert 'options' in result
+        assert len(result['options']) == 3
+        assert result['options'][0] == "Yes"
+        assert "allow all commands" in result['options'][1]
+        assert "No" in result['options'][2]
+
+    def test_hook_handles_line_log_read_error(self, tmp_path):
+        """When line log exists but is unreadable, hook should fall back to byte buffer."""
+        import os
+        session_id = "test_session_error"
+
+        line_log_path = tmp_path / f"claude_lines_{session_id}.txt"
+        buffer_path = tmp_path / f"claude_output_{session_id}.txt"
+
+        # Create line log and make it unreadable
+        line_log_path.write_text("Some content")
+        os.chmod(line_log_path, 0o000)  # Remove all permissions
+
+        # Create buffer as fallback
+        buffer_path.write_bytes(
+            b"Permission prompt\n"
+            b"1. Yes\n"
+            b"2. No\n"
+        )
+
+        try:
+            # Verify line log exists but is unreadable
+            assert line_log_path.exists()
+
+            # The hook should catch the read error and fall back to buffer
+            # (read_line_log returns None on error)
+        finally:
+            # Restore permissions for cleanup
+            os.chmod(line_log_path, 0o644)

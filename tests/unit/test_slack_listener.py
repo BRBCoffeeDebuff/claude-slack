@@ -565,3 +565,391 @@ class TestHandleDMCommands:
         call_args = say.call_args
         assert '/sessions' in call_args.kwargs['text']
         assert '/attach' in call_args.kwargs['text']
+
+
+class TestAskUserQuestionReactionHandler:
+    """Test reaction handling for AskUserQuestion."""
+
+    def test_reaction_maps_emoji_to_option_index(self):
+        """Map 1️⃣ 2️⃣ 3️⃣ 4️⃣ to option indices."""
+        from slack_listener import ASKUSER_EMOJI_MAP
+
+        # Verify emoji mappings
+        assert ASKUSER_EMOJI_MAP['one'] == '0'
+        assert ASKUSER_EMOJI_MAP['two'] == '1'
+        assert ASKUSER_EMOJI_MAP['three'] == '2'
+        assert ASKUSER_EMOJI_MAP['four'] == '3'
+
+        # Unicode emoji versions
+        assert ASKUSER_EMOJI_MAP['1️⃣'] == '0'
+        assert ASKUSER_EMOJI_MAP['2️⃣'] == '1'
+        assert ASKUSER_EMOJI_MAP['3️⃣'] == '2'
+        assert ASKUSER_EMOJI_MAP['4️⃣'] == '3'
+
+    def test_reaction_extracts_metadata_from_block_id(self, tmp_path, mock_slack_client):
+        """Extract session_id, request_id, question_index from block_id."""
+        from slack_listener import handle_askuser_reaction
+
+        # Create temporary response directory
+        response_dir = tmp_path / "askuser_responses"
+        response_dir.mkdir()
+
+        # Mock message with AskUserQuestion block_id
+        mock_slack_client.conversations_history.return_value = {
+            'ok': True,
+            'messages': [{
+                'ts': '111.222',
+                'thread_ts': '100.000',
+                'blocks': [
+                    {
+                        'type': 'section',
+                        'block_id': 'askuser_Q0_sess123_req456',
+                        'text': {'type': 'mrkdwn', 'text': 'Question here'}
+                    }
+                ]
+            }]
+        }
+
+        body = {
+            'event': {
+                'type': 'reaction_added',
+                'user': 'U123',
+                'reaction': 'one',
+                'item': {
+                    'channel': 'C123',
+                    'ts': '111.222'
+                }
+            }
+        }
+
+        with patch('slack_listener.ASKUSER_RESPONSE_DIR', response_dir):
+            result = handle_askuser_reaction(body, mock_slack_client)
+
+            # Should return True for successful handling
+            assert result is True
+
+            # Verify response file was created with correct metadata
+            response_file = response_dir / "sess123_req456.json"
+            assert response_file.exists()
+
+    def test_reaction_writes_response_file(self, tmp_path, mock_slack_client):
+        """Write response file on valid reaction."""
+        from slack_listener import handle_askuser_reaction
+
+        # Set up temporary response directory
+        response_dir = tmp_path / "askuser_responses"
+        response_dir.mkdir()
+
+        # Mock message with AskUserQuestion block_id
+        mock_slack_client.conversations_history.return_value = {
+            'ok': True,
+            'messages': [{
+                'ts': '111.222',
+                'thread_ts': '100.000',
+                'blocks': [
+                    {
+                        'type': 'section',
+                        'block_id': 'askuser_Q0_sess123_req456',
+                        'text': {'type': 'mrkdwn', 'text': 'Question here'}
+                    }
+                ]
+            }]
+        }
+
+        body = {
+            'event': {
+                'type': 'reaction_added',
+                'user': 'U123',
+                'reaction': 'one',  # Maps to '0'
+                'item': {
+                    'channel': 'C123',
+                    'ts': '111.222'
+                }
+            }
+        }
+
+        with patch('slack_listener.ASKUSER_RESPONSE_DIR', response_dir):
+            handle_askuser_reaction(body, mock_slack_client)
+
+        # Verify response file was created
+        response_file = response_dir / "sess123_req456.json"
+        assert response_file.exists()
+
+        # Verify content
+        import json
+        with open(response_file) as f:
+            data = json.load(f)
+
+        assert data['question_0'] == '0'
+        assert data['user_id'] == 'U123'
+        assert 'timestamp' in data
+
+    def test_reaction_ignores_invalid_emoji(self, mock_slack_client):
+        """Ignore non-number emojis like 👍."""
+        from slack_listener import handle_askuser_reaction
+
+        # Mock message with AskUserQuestion block_id
+        mock_slack_client.conversations_history.return_value = {
+            'ok': True,
+            'messages': [{
+                'ts': '111.222',
+                'blocks': [
+                    {
+                        'type': 'section',
+                        'block_id': 'askuser_Q0_sess123_req456',
+                        'text': {'type': 'mrkdwn', 'text': 'Question here'}
+                    }
+                ]
+            }]
+        }
+
+        body = {
+            'event': {
+                'type': 'reaction_added',
+                'user': 'U123',
+                'reaction': 'thumbsup',  # Not mapped for AskUser
+                'item': {
+                    'channel': 'C123',
+                    'ts': '111.222'
+                }
+            }
+        }
+
+        # Should return False for unmapped emoji
+        result = handle_askuser_reaction(body, mock_slack_client)
+        assert result is False
+
+    def test_updates_message_on_selection(self, tmp_path, mock_slack_client):
+        """Update Slack message to show selection."""
+        from slack_listener import handle_askuser_reaction
+
+        response_dir = tmp_path / "askuser_responses"
+        response_dir.mkdir()
+
+        # Mock message with AskUserQuestion block_id
+        mock_slack_client.conversations_history.return_value = {
+            'ok': True,
+            'messages': [{
+                'ts': '111.222',
+                'thread_ts': '100.000',
+                'blocks': [
+                    {
+                        'type': 'section',
+                        'block_id': 'askuser_Q0_sess123_req456',
+                        'text': {'type': 'mrkdwn', 'text': 'Question here'}
+                    }
+                ]
+            }]
+        }
+
+        body = {
+            'event': {
+                'type': 'reaction_added',
+                'user': 'U123',
+                'reaction': 'two',  # Maps to '1'
+                'item': {
+                    'channel': 'C123',
+                    'ts': '111.222'
+                }
+            }
+        }
+
+        with patch('slack_listener.ASKUSER_RESPONSE_DIR', response_dir):
+            handle_askuser_reaction(body, mock_slack_client)
+
+        # Verify chat_update was called
+        mock_slack_client.chat_update.assert_called_once()
+
+        # Verify the update shows the selection
+        call_kwargs = mock_slack_client.chat_update.call_args.kwargs
+        assert call_kwargs['channel'] == 'C123'
+        assert call_kwargs['ts'] == '111.222'
+
+
+class TestAskUserQuestionThreadReply:
+    """Test thread reply handling for 'Other' responses."""
+
+    def test_thread_reply_to_askuser_message(self, tmp_path, mock_slack_client):
+        """Thread reply treated as 'Other' response."""
+        from slack_listener import handle_askuser_thread_reply
+        import json
+
+        # Setup: mock parent message with askuser block_id
+        parent_message = {
+            'ts': '1234567890.123456',
+            'thread_ts': '1234567890.123456',
+            'blocks': [
+                {
+                    'type': 'section',
+                    'block_id': 'askuser_Q0_test-session_req-123',
+                    'text': {'type': 'mrkdwn', 'text': 'Which option?'}
+                }
+            ]
+        }
+
+        mock_slack_client.conversations_history.return_value = {
+            'ok': True,
+            'messages': [parent_message]
+        }
+
+        # Create temporary response directory
+        response_dir = tmp_path / "askuser_responses"
+        response_dir.mkdir()
+
+        # Thread reply event
+        event = {
+            'type': 'message',
+            'user': 'U123456',
+            'text': 'I prefer a custom approach',
+            'ts': '1234567890.123457',
+            'channel': 'C123456',
+            'thread_ts': '1234567890.123456'
+        }
+
+        with patch('slack_listener.ASKUSER_RESPONSE_DIR', response_dir):
+            with patch('slack_listener.app') as mock_app:
+                mock_app.client = mock_slack_client
+                # Call the handler
+                handle_askuser_thread_reply(event, mock_slack_client)
+
+        # Verify response file created
+        response_files = list(response_dir.glob("*.json"))
+        assert len(response_files) == 1
+
+        # Check response file content
+        with open(response_files[0], 'r') as f:
+            response_data = json.load(f)
+
+        assert response_data['question_0'] == 'other'
+        assert response_data['question_0_text'] == 'I prefer a custom approach'
+        assert response_data['user_id'] == 'U123456'
+        assert 'timestamp' in response_data
+
+    def test_thread_reply_extracts_metadata_from_parent(self, mock_slack_client):
+        """Get session/request ID from parent message."""
+        from slack_listener import handle_askuser_thread_reply
+
+        # Parent message with metadata in block_id
+        parent_message = {
+            'ts': '1234567890.123456',
+            'blocks': [
+                {
+                    'type': 'section',
+                    'block_id': 'askuser_Q0_my-session_my-request',
+                    'text': {'type': 'mrkdwn', 'text': 'Choose one'}
+                }
+            ]
+        }
+
+        mock_slack_client.conversations_history.return_value = {
+            'ok': True,
+            'messages': [parent_message]
+        }
+
+        event = {
+            'type': 'message',
+            'user': 'U123456',
+            'text': 'My custom reply',
+            'ts': '1234567890.123457',
+            'channel': 'C123456',
+            'thread_ts': '1234567890.123456'
+        }
+
+        with patch('slack_listener.ASKUSER_RESPONSE_DIR', Path('/tmp/test_askuser')):
+            try:
+                handle_askuser_thread_reply(event, mock_slack_client)
+            except Exception:
+                pass  # May fail when writing file, but we check API calls
+
+        # Verify conversations_history was called to fetch parent
+        mock_slack_client.conversations_history.assert_called_once()
+        call_kwargs = mock_slack_client.conversations_history.call_args.kwargs
+        assert call_kwargs['channel'] == 'C123456'
+        assert call_kwargs['latest'] == '1234567890.123456'
+        assert call_kwargs['inclusive'] is True
+        assert call_kwargs['limit'] == 1
+
+    def test_thread_reply_updates_parent_message(self, tmp_path, mock_slack_client):
+        """Update parent message to show 'Other' selection."""
+        from slack_listener import handle_askuser_thread_reply
+
+        # Parent message
+        parent_message = {
+            'ts': '1234567890.123456',
+            'blocks': [
+                {
+                    'type': 'section',
+                    'block_id': 'askuser_Q0_sess-id_req-id',
+                    'text': {'type': 'mrkdwn', 'text': 'Question?'}
+                }
+            ]
+        }
+
+        mock_slack_client.conversations_history.return_value = {
+            'ok': True,
+            'messages': [parent_message]
+        }
+
+        event = {
+            'type': 'message',
+            'user': 'U123456',
+            'text': 'This is my detailed custom answer',
+            'ts': '1234567890.123457',
+            'channel': 'C123456',
+            'thread_ts': '1234567890.123456'
+        }
+
+        response_dir = tmp_path / "askuser_responses"
+        response_dir.mkdir()
+
+        with patch('slack_listener.ASKUSER_RESPONSE_DIR', response_dir):
+            with patch('slack_listener.app') as mock_app:
+                mock_app.client = mock_slack_client
+                handle_askuser_thread_reply(event, mock_slack_client)
+
+        # Verify chat_update was called to update parent message
+        mock_slack_client.chat_update.assert_called_once()
+        call_kwargs = mock_slack_client.chat_update.call_args.kwargs
+        assert call_kwargs['channel'] == 'C123456'
+        assert call_kwargs['ts'] == '1234567890.123456'
+        # Check that the update shows "Other" selection with preview
+        assert 'Other' in str(call_kwargs['blocks'])
+        assert 'This is my detailed' in str(call_kwargs['blocks'])
+
+    def test_thread_reply_ignores_non_askuser_messages(self, mock_slack_client):
+        """Non-AskUser thread replies are ignored."""
+        from slack_listener import handle_askuser_thread_reply
+
+        # Parent message WITHOUT askuser block_id
+        parent_message = {
+            'ts': '1234567890.123456',
+            'blocks': [
+                {
+                    'type': 'section',
+                    'block_id': 'regular_message_block',
+                    'text': {'type': 'mrkdwn', 'text': 'Regular message'}
+                }
+            ]
+        }
+
+        mock_slack_client.conversations_history.return_value = {
+            'ok': True,
+            'messages': [parent_message]
+        }
+
+        event = {
+            'type': 'message',
+            'user': 'U123456',
+            'text': 'A reply',
+            'ts': '1234567890.123457',
+            'channel': 'C123456',
+            'thread_ts': '1234567890.123456'
+        }
+
+        with patch('slack_listener.ASKUSER_RESPONSE_DIR', Path('/tmp/test')):
+            # Should return without creating response file
+            result = handle_askuser_thread_reply(event, mock_slack_client)
+            assert result is None
+
+        # chat_update should NOT be called for non-askuser messages
+        mock_slack_client.chat_update.assert_not_called()

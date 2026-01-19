@@ -41,6 +41,7 @@ import os
 import sys
 import json
 import time
+import fcntl
 import socket as sock_module
 from pathlib import Path
 from slack_bolt import App
@@ -48,6 +49,10 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from registry_db import RegistryDatabase
 from config import get_registry_db_path, get_socket_dir
 from dotenv import load_dotenv
+
+# AskUserQuestion response handling
+ASKUSER_RESPONSE_DIR = Path.home() / ".claude" / "slack" / "askuser_responses"
+ASKUSER_RESPONSE_DIR.mkdir(parents=True, exist_ok=True)
 
 # Load environment variables from .env file (in parent directory)
 env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
@@ -99,6 +104,96 @@ except KeyError:
         def view(self, *args, **kwargs):
             return lambda f: f
     app = _DummyApp()
+
+
+def atomic_write_response_file(response_file: Path, data: dict) -> bool:
+    """Atomically write response data to file with locking.
+
+    Uses a lock file pattern to prevent race conditions when the hook
+    is reading/deleting the file while this function is writing to it.
+
+    Args:
+        response_file: Path to the response file to write
+        data: Dictionary data to write as JSON
+
+    Returns:
+        bool: True if write succeeded, False otherwise
+    """
+    lock_file = Path(str(response_file) + '.lock')
+
+    try:
+        # Create and lock
+        with open(lock_file, 'w') as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)  # Exclusive lock
+
+            # Write data
+            with open(response_file, 'w') as f:
+                json.dump(data, f)
+
+            print(f"✅ Atomically wrote response file: {response_file}", file=sys.stderr)
+            return True
+
+    except Exception as e:
+        print(f"❌ Error in atomic write: {e}", file=sys.stderr)
+        return False
+    finally:
+        # Clean up lock file
+        try:
+            if lock_file.exists():
+                lock_file.unlink()
+        except:
+            pass
+
+
+def atomic_read_and_update_response_file(response_file: Path, update_data: dict) -> bool:
+    """Atomically read existing response, merge with new data, and write back.
+
+    Uses a lock file pattern to prevent race conditions.
+
+    Args:
+        response_file: Path to the response file
+        update_data: Dictionary data to merge with existing data
+
+    Returns:
+        bool: True if operation succeeded, False otherwise
+    """
+    lock_file = Path(str(response_file) + '.lock')
+
+    try:
+        # Create and lock
+        with open(lock_file, 'w') as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)  # Exclusive lock
+
+            # Load existing data if file exists
+            existing_data = {}
+            if response_file.exists():
+                try:
+                    with open(response_file) as f:
+                        existing_data = json.load(f)
+                    print(f"📖 Loaded existing response: {existing_data}", file=sys.stderr)
+                except Exception as e:
+                    print(f"⚠️  Could not load existing response: {e}", file=sys.stderr)
+
+            # Merge new data
+            existing_data.update(update_data)
+
+            # Write merged data back
+            with open(response_file, 'w') as f:
+                json.dump(existing_data, f)
+
+            print(f"✅ Atomically updated response file: {response_file}", file=sys.stderr)
+            return True
+
+    except Exception as e:
+        print(f"❌ Error in atomic update: {e}", file=sys.stderr)
+        return False
+    finally:
+        # Clean up lock file
+        try:
+            if lock_file.exists():
+                lock_file.unlink()
+        except:
+            pass
 
 
 def get_socket_for_thread(thread_ts):
@@ -522,6 +617,14 @@ def handle_message(event, say):
     if not text:
         return
 
+    # Check if this is a thread reply to an AskUserQuestion message
+    if thread_ts:
+        result = handle_askuser_thread_reply(event, app.client)
+        if result:
+            # This was an AskUser "Other" response, handled
+            print(f"💬 Handled as AskUser 'Other' response", file=sys.stderr)
+            return
+
     # Check if this is a DM channel and try to handle as DM command
     if channel_type == 'im':
         if handle_dm_message(text, user, channel, registry_db, app.client, say):
@@ -618,6 +721,9 @@ def handle_reaction(body, client):
     """
     Handle emoji reactions as quick numeric responses.
 
+    First checks if this is an AskUserQuestion reaction (number emojis 1-4).
+    If not, treats as permission prompt response.
+
     Maps emoji reactions to number inputs for fast permission responses:
     - 1️⃣ / 👍 → "1" (approve this time)
     - 2️⃣ → "2" (approve for session/project)
@@ -636,6 +742,11 @@ def handle_reaction(body, client):
             return
     except Exception as e:
         print(f"⚠️  Could not check bot user id: {e}", file=sys.stderr)
+
+    # Try handling as AskUserQuestion reaction first
+    if handle_askuser_reaction(body, client):
+        print(f"📌 Handled as AskUserQuestion reaction", file=sys.stderr)
+        return
 
     emoji_name = event.get("reaction")
     item = event.get("item", {})
@@ -864,6 +975,319 @@ def handle_permission_button(ack, body, client):
 
 PERMISSION_RESPONSE_DIR = Path.home() / ".claude" / "slack" / "permission_responses"
 PERMISSION_RESPONSE_DIR.mkdir(parents=True, exist_ok=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AskUserQuestion Reaction Handler
+# Handles emoji reactions on AskUserQuestion messages
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Map emoji reactions to option indices (0-based)
+# Emoji reaction names to 0-indexed option values
+# 'one' (1️⃣) -> '0' (first option, 0-indexed)
+# 'two' (2️⃣) -> '1' (second option, 0-indexed)
+# 'three' (3️⃣) -> '2' (third option, 0-indexed)
+# 'four' (4️⃣) -> '3' (fourth option, 0-indexed)
+# IMPORTANT: Display is 1-indexed (shows "Option 1, Option 2") but responses are 0-indexed
+# This ensures consistent option indexing across display and storage layers
+ASKUSER_EMOJI_MAP = {
+    'one': '0', 'two': '1', 'three': '2', 'four': '3',  # Emoji name format
+    '1️⃣': '0', '2️⃣': '1', '3️⃣': '2', '4️⃣': '3',  # Unicode emoji format
+}
+
+
+def handle_askuser_reaction(body, client):
+    """
+    Handle emoji reactions on AskUserQuestion messages.
+
+    When a user reacts with a number emoji (1️⃣ 2️⃣ 3️⃣ 4️⃣) to an AskUserQuestion message,
+    this handler:
+    1. Fetches the message to check for askuser block_id
+    2. Extracts metadata (session_id, request_id, question_index) from block_id
+    3. Maps emoji to option index
+    4. Writes response file for the hook to read
+    5. Updates the message to show the selection
+
+    Block ID format: askuser_Q{n}_{session_id}_{request_id}
+
+    Returns:
+        True if handled as AskUser reaction, False otherwise
+    """
+    print(f"🔢 Checking if reaction is for AskUserQuestion", file=sys.stderr)
+
+    try:
+        # Extract reaction event details
+        event = body.get("event", {})
+        emoji_name = event.get("reaction")
+        item = event.get("item", {})
+        channel = item.get("channel")
+        message_ts = item.get("ts")
+        user_id = event.get("user")
+
+        print(f"🔢 Emoji: {emoji_name}, Channel: {channel}, TS: {message_ts}, User: {user_id}", file=sys.stderr)
+
+        # Check if this emoji is mapped to an option index
+        option_index = ASKUSER_EMOJI_MAP.get(emoji_name)
+        if not option_index:
+            print(f"🔢 Emoji '{emoji_name}' not mapped for AskUser", file=sys.stderr)
+            return False
+
+        # Fetch the message to check if it's an AskUserQuestion message
+        try:
+            result = client.conversations_history(
+                channel=channel,
+                latest=message_ts,
+                inclusive=True,
+                limit=1
+            )
+            messages = result.get("messages", [])
+            if not messages:
+                print(f"🔢 Message not found", file=sys.stderr)
+                return False
+
+            message = messages[0]
+        except Exception as e:
+            print(f"⚠️  Could not fetch message: {e}", file=sys.stderr)
+            return False
+
+        # Check for AskUserQuestion block_id
+        blocks = message.get("blocks", [])
+        askuser_block = None
+        for block in blocks:
+            block_id = block.get("block_id", "")
+            if block_id.startswith("askuser_"):
+                askuser_block = block
+                break
+
+        if not askuser_block:
+            print(f"🔢 Not an AskUserQuestion message", file=sys.stderr)
+            return False
+
+        # Extract metadata from block_id: askuser_Q{n}_{session_id}_{request_id}
+        block_id = askuser_block.get("block_id", "")
+        parts = block_id.split("_")
+        if len(parts) < 4:
+            print(f"⚠️  Invalid block_id format: {block_id}", file=sys.stderr)
+            return False
+
+        question_num = parts[1]  # e.g., "Q0"
+        session_id = parts[2]
+        request_id = parts[3]
+
+        # Extract question index from "Q0" -> "0"
+        if not question_num.startswith("Q"):
+            print(f"⚠️  Invalid question number format: {question_num}", file=sys.stderr)
+            return False
+
+        question_index = question_num[1:]  # Remove "Q" prefix
+
+        print(f"🔢 Parsed: question={question_index}, session={session_id[:8]}, request={request_id}, option={option_index}", file=sys.stderr)
+
+        # Accumulate response (merge with existing answers if any)
+        response_file = ASKUSER_RESPONSE_DIR / f"{session_id}_{request_id}.json"
+
+        # Add new answer (use atomic update to prevent race conditions)
+        new_data = {
+            f"question_{question_index}": option_index,
+            "user_id": user_id,
+            "timestamp": time.time()
+        }
+        atomic_read_and_update_response_file(response_file, new_data)
+
+        # Read back the merged data for message update
+        try:
+            with open(response_file) as f:
+                merged_data = json.load(f)
+        except:
+            merged_data = new_data
+
+        # Update message to show selection and progress
+        try:
+            # Count total questions by finding all askuser blocks
+            total_questions = sum(1 for b in blocks if b.get("block_id", "").startswith("askuser_Q"))
+
+            # Count answered questions from the response data
+            answered_questions = sum(1 for i in range(total_questions) if f"question_{i}" in merged_data)
+
+            # Build updated blocks showing the selection and progress
+            updated_blocks = []
+            for block in blocks:
+                if block.get("block_id") == block_id:
+                    # Update this block to show the selection
+                    text = block.get("text", {}).get("text", "")
+                    option_num = int(option_index) + 1  # Convert 0-based to 1-based for display
+
+                    # Add progress indicator if multi-question
+                    if total_questions > 1:
+                        progress = f"✅ *Q{int(question_index)+1}: <@{user_id}> selected option {option_num}* ({answered_questions}/{total_questions} answered)\n\n{text}"
+                    else:
+                        progress = f"✅ *<@{user_id}> selected option {option_num}*\n\n{text}"
+
+                    updated_blocks.append({
+                        "type": "section",
+                        "block_id": block_id,
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": progress
+                        }
+                    })
+                else:
+                    updated_blocks.append(block)
+
+            # Update summary text
+            if total_questions > 1:
+                summary_text = f"AskUserQuestion: {answered_questions}/{total_questions} answered"
+            else:
+                summary_text = f"AskUserQuestion answered: Option {int(option_index) + 1}"
+
+            client.chat_update(
+                channel=channel,
+                ts=message_ts,
+                blocks=updated_blocks,
+                text=summary_text
+            )
+
+            print(f"🔢 Updated message to show selection (progress: {answered_questions}/{total_questions})", file=sys.stderr)
+
+        except Exception as e:
+            print(f"⚠️  Could not update message: {e}", file=sys.stderr)
+            # Continue - response file was written successfully
+
+        return True
+
+    except Exception as e:
+        print(f"❌ Error in AskUser reaction handler: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        return False
+
+
+def handle_askuser_thread_reply(event, client):
+    """
+    Handle thread replies to AskUserQuestion messages as "Other" responses.
+
+    When a user replies in a thread to an AskUserQuestion message, treat it as
+    selecting the "Other" option with custom text.
+
+    Args:
+        event: Slack message event
+        client: Slack WebClient
+
+    Returns:
+        True if handled as AskUser reply, None otherwise
+    """
+    print(f"💬 Checking if thread reply is AskUser response", file=sys.stderr)
+
+    try:
+        thread_ts = event.get("thread_ts")
+        if not thread_ts:
+            return None
+
+        channel = event.get("channel")
+        user_id = event.get("user")
+        text = event.get("text", "")
+
+        # Fetch parent message to check if it's an AskUserQuestion
+        try:
+            result = client.conversations_history(
+                channel=channel,
+                latest=thread_ts,
+                inclusive=True,
+                limit=1
+            )
+            messages = result.get("messages", [])
+            if not messages:
+                return None
+
+            parent_message = messages[0]
+        except Exception as e:
+            print(f"⚠️  Could not fetch parent message: {e}", file=sys.stderr)
+            return None
+
+        # Check for AskUserQuestion block_id in parent
+        blocks = parent_message.get("blocks", [])
+        askuser_block = None
+        for block in blocks:
+            block_id = block.get("block_id", "")
+            if block_id.startswith("askuser_"):
+                askuser_block = block
+                break
+
+        if not askuser_block:
+            # Not an AskUser message
+            return None
+
+        # Extract metadata from block_id: askuser_Q{n}_{session_id}_{request_id}
+        block_id = askuser_block.get("block_id", "")
+        parts = block_id.split("_")
+        if len(parts) < 4:
+            print(f"⚠️  Invalid block_id format: {block_id}", file=sys.stderr)
+            return None
+
+        question_num = parts[1]  # e.g., "Q0"
+        session_id = parts[2]
+        request_id = parts[3]
+
+        # Extract question index
+        if not question_num.startswith("Q"):
+            print(f"⚠️  Invalid question number format: {question_num}", file=sys.stderr)
+            return None
+
+        question_index = question_num[1:]
+
+        print(f"💬 Thread reply is AskUser 'Other' response: question={question_index}, session={session_id[:8]}", file=sys.stderr)
+
+        # Accumulate response (merge with existing answers if any)
+        response_file = ASKUSER_RESPONSE_DIR / f"{session_id}_{request_id}.json"
+
+        # Add new answer (use atomic update to prevent race conditions)
+        new_data = {
+            f"question_{question_index}": "other",
+            f"question_{question_index}_text": text,
+            "user_id": user_id,
+            "timestamp": time.time()
+        }
+        atomic_read_and_update_response_file(response_file, new_data)
+
+        # Update parent message to show "Other" selection
+        try:
+            # Truncate text for display (max 100 chars)
+            text_preview = text[:100] + "..." if len(text) > 100 else text
+
+            updated_blocks = []
+            for block in blocks:
+                if block.get("block_id") == block_id:
+                    original_text = block.get("text", {}).get("text", "")
+                    updated_text = f"✅ *<@{user_id}> selected: Other*\n\n_{text_preview}_\n\n{original_text}"
+                    updated_blocks.append({
+                        "type": "section",
+                        "block_id": block_id,
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": updated_text
+                        }
+                    })
+                else:
+                    updated_blocks.append(block)
+
+            client.chat_update(
+                channel=channel,
+                ts=thread_ts,
+                blocks=updated_blocks,
+                text="AskUserQuestion answered: Other"
+            )
+
+            print(f"💬 Updated parent message to show 'Other' selection", file=sys.stderr)
+
+        except Exception as e:
+            print(f"⚠️  Could not update parent message: {e}", file=sys.stderr)
+
+        return True
+
+    except Exception as e:
+        print(f"❌ Error in AskUser thread reply handler: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        return None
 
 
 @app.action("permission_allow")

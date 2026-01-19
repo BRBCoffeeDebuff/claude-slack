@@ -59,8 +59,12 @@ load_dotenv(env_path)
 
 try:
     from core.config import get_socket_dir, get_log_dir, get_claude_bin
+    from core.session_discovery import find_active_session
+    from core.line_logger import LineLogger
 except ModuleNotFoundError:
     from config import get_socket_dir, get_log_dir, get_claude_bin
+    from session_discovery import find_active_session
+    from line_logger import LineLogger
 
 # Configuration
 SOCKET_DIR = os.environ.get("SLACK_SOCKET_DIR", get_socket_dir())
@@ -488,6 +492,12 @@ class HybridPTYWrapper:
 
         self.buffer_lock = threading.Lock()
         self.logger.info(f"Output buffer initialized: {self.buffer_file}")
+
+        # Initialize LineLogger for session change detection
+        self.line_logger = LineLogger(max_lines=500)
+        self.log_dir = Path(LOG_DIR)
+        self.line_log_file = self.log_dir / f"claude_lines_{session_id}.txt"
+        self.logger.info(f"LineLogger initialized: {self.line_log_file}")
 
     def _extract_resume_session_id(self):
         """
@@ -942,10 +952,30 @@ class HybridPTYWrapper:
             # Add to ring buffer (automatically drops oldest if full)
             self.output_buffer.extend(data)
 
+            # Capture timestamp for timing instrumentation
+            buffer_write_time = time.time()
+
             # Write entire buffer to file for notification hook to read
             try:
                 with open(self.buffer_file, 'wb') as f:
                     f.write(bytes(self.output_buffer))
+
+                # Write timing metadata to companion file
+                metadata_file = self.buffer_file.replace('.txt', '.meta')
+                metadata = {
+                    'buffer_write_time': buffer_write_time,
+                    'session_id': self.session_id
+                }
+                with open(metadata_file, 'w') as f:
+                    json.dump(metadata, f)
+
+                # Log timing event for analysis
+                self.logger.debug(f"[TIMING] session_id={self.session_id[:8]} buffer_write={buffer_write_time:.6f}")
+
+                # Update line logger and write to file
+                self.line_logger.add_data(data)
+                self.line_logger.save_to_file(self.line_log_file)
+
             except Exception as e:
                 self.logger.error(f"Failed to write output buffer: {e}")
 
@@ -960,6 +990,105 @@ class HybridPTYWrapper:
                 self.logger.debug("Output buffer cleared")
             except Exception as e:
                 self.logger.error(f"Failed to clear output buffer: {e}")
+
+    def _check_session_change(self):
+        """
+        Check if a session change is pending and handle it.
+
+        Called periodically from the main I/O loop to detect when Claude
+        executes /compact or /resume commands.
+        """
+        if self.line_logger.session_change_pending:
+            self.logger.info("Session change detected by LineLogger")
+            self._handle_session_change()
+
+    def _handle_session_change(self):
+        """
+        Handle a session change by discovering the new session ID and updating registry.
+
+        This method:
+        1. Acknowledges the session change flag
+        2. Discovers the new session ID using find_active_session()
+        3. Updates the wrapper's session tracking
+        4. Updates the registry with new session ID while preserving Slack thread
+        5. Updates buffer file paths
+        """
+        # Acknowledge the session change flag
+        was_pending = self.line_logger.acknowledge_session_change()
+        if not was_pending:
+            self.logger.debug("Session change already acknowledged")
+            return
+
+        self.logger.info("Handling session change - discovering new session ID")
+
+        # Save old session ID for logging and registry update
+        old_session_id = self.claude_session_uuid if hasattr(self, 'claude_session_uuid') else self.session_id
+
+        # Wait briefly for new session file to be created
+        time.sleep(0.5)
+
+        # Discover new session ID from most recent buffer file
+        new_session_id = find_active_session(self.log_dir)
+
+        if not new_session_id:
+            self.logger.warning("Failed to discover new session ID after session change")
+            return
+
+        if new_session_id == old_session_id:
+            self.logger.info(f"Session ID unchanged: {new_session_id[:8]}")
+            return
+
+        self.logger.info(f"Session change: {old_session_id[:8]} -> {new_session_id[:8]}")
+
+        # Update wrapper's session tracking
+        self.claude_session_uuid = new_session_id
+
+        # Update buffer file paths
+        self.update_buffer_file_path(new_session_id)
+
+        # Update line log file path
+        old_line_log = self.line_log_file
+        self.line_log_file = self.log_dir / f"claude_lines_{new_session_id}.txt"
+        self.logger.info(f"Line log file updated: {old_line_log} -> {self.line_log_file}")
+
+        # Update registry with new session ID, preserving Slack thread
+        if self.registry and self.registry.available:
+            try:
+                # Get existing entry to preserve thread_ts and other metadata
+                # Use the registry's _send_command method to get session data
+                response = self.registry._send_command("GET", {"session_id": old_session_id})
+
+                if response and response.get("success"):
+                    old_entry = response.get("session", {})
+
+                    # Register new session with same Slack metadata
+                    register_data = {
+                        "session_id": new_session_id,
+                        "project": old_entry.get("project", os.path.basename(self.project_dir)),
+                        "project_dir": old_entry.get("project_dir", self.project_dir),
+                        "terminal": old_entry.get("terminal", os.environ.get("TERM_PROGRAM", "Unknown")),
+                        "socket_path": self.socket_path,
+                        "thread_ts": old_entry.get("slack_thread_ts"),
+                        "channel": old_entry.get("slack_channel"),
+                        "permissions_channel": old_entry.get("permissions_channel"),
+                        "slack_user_id": old_entry.get("slack_user_id"),
+                        "reply_to_ts": old_entry.get("reply_to_ts"),
+                        "todo_message_ts": old_entry.get("todo_message_ts"),
+                        "buffer_file_path": self.buffer_file
+                    }
+
+                    # Register the new session with preserved metadata
+                    register_response = self.registry._send_command("REGISTER_EXISTING", {"data": register_data})
+
+                    if register_response and register_response.get("success"):
+                        self.logger.info(f"Registry updated: new session {new_session_id[:8]} registered with preserved Slack thread")
+                    else:
+                        self.logger.warning(f"Failed to register new session in registry: {register_response}")
+                else:
+                    self.logger.warning(f"Could not get old session data from registry: {response}")
+
+            except Exception as e:
+                self.logger.error(f"Error updating registry for session change: {e}", exc_info=True)
 
     def update_buffer_file_path(self, claude_session_id):
         """
@@ -991,6 +1120,10 @@ class HybridPTYWrapper:
                 # Update buffer file path
                 self.buffer_file = new_buffer_file
                 self.logger.info(f"Buffer file path updated to use Claude session ID: {claude_session_id[:8]}")
+
+                # Update line log file path
+                self.line_log_file = self.log_dir / f"claude_lines_{claude_session_id}.txt"
+                self.logger.info(f"Line log file path updated: {self.line_log_file}")
 
                 # Store buffer file path in registry for ALL sessions (wrapper + Claude)
                 # This allows hooks to find the buffer even if session IDs don't match
@@ -1231,6 +1364,9 @@ class HybridPTYWrapper:
                                 else:
                                     break
 
+                            # Check for session change after each iteration
+                            self._check_session_change()
+
                     except (OSError, KeyboardInterrupt):
                         pass
                 else:
@@ -1252,6 +1388,9 @@ class HybridPTYWrapper:
                                 else:
                                     # Claude exited
                                     break
+
+                            # Check for session change after each iteration
+                            self._check_session_change()
 
                     except (OSError, KeyboardInterrupt):
                         pass
