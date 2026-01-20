@@ -605,6 +605,7 @@ def handle_message(event, say):
 
     Ignores:
     - Bot messages (to avoid loops)
+    - Join/leave messages (channel_join, channel_leave, group_join, group_leave)
     - Empty messages
 
     Supports:
@@ -614,6 +615,11 @@ def handle_message(event, say):
     """
     # Ignore bot messages
     if event.get("bot_id") or event.get("subtype") == "bot_message":
+        return
+
+    # Ignore join/leave messages
+    subtype = event.get("subtype")
+    if subtype in ("channel_join", "channel_leave", "group_join", "group_leave"):
         return
 
     text = event.get("text", "").strip()

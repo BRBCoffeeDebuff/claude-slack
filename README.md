@@ -32,29 +32,102 @@ When running Claude Code via SSH (with VibeTunnel, Tailscale, etc.), the termina
 | **Auto Channels** | Automatic channel creation per project |
 | **Session Tracking** | Handles `/compact` and `/resume` seamlessly |
 
-## Quick Start
+## Getting Started
+
+### Prerequisites
+- Python 3.10+ (tested on 3.14)
+- Slack workspace with admin access (to create apps)
+- Claude Code CLI installed
+
+### Step 1: Create a Slack App
+
+You need to create a Slack app with the proper permissions before using this integration.
+
+1. Go to https://api.slack.com/apps → "Create New App" → "From an app manifest"
+2. Select your workspace and paste the contents of [`app-manifest.yaml`](app-manifest.yaml)
+3. Click "Create"
+4. **Install to workspace:** Go to "OAuth & Permissions" → "Install to Workspace" → Copy the "Bot User OAuth Token" (`xoxb-...`)
+5. **Generate app token:** Go to "Basic Information" → "App-Level Tokens" → Generate token with `connections:write` scope → Copy token (`xapp-...`)
+
+The manifest includes all required scopes, event subscriptions, shortcuts, and interactivity settings.
+
+<details>
+<summary>What the Slack app needs (included in manifest)</summary>
+
+**OAuth Scopes (Bot Token):**
+- `app_mentions:read` - Receive @mentions
+- `channels:history`, `channels:read` - Read messages and channel info
+- `channels:join`, `channels:manage` - Auto-join and create channels
+- `chat:write`, `chat:write.public` - Post messages
+- `reactions:read`, `reactions:write` - Emoji reactions for approvals
+- `users:read` - Display user names
+- `im:history`, `im:read`, `im:write` - DM support
+- `groups:*` - Private channel support
+
+**Event Subscriptions (Socket Mode):**
+- `app_mention` - Respond to @mentions
+- `message.channels`, `message.groups`, `message.im` - Receive messages
+- `reaction_added` - Handle emoji reactions
+
+**Features:**
+- Socket Mode enabled (real-time events without a public URL)
+- Interactivity enabled (for buttons and modals)
+- Global shortcuts (for session management)
+
+</details>
+
+### Step 2: Clone and Install
 
 ```bash
-# 1. Clone and install
 git clone https://github.com/BRBCoffeeDebuff/claude-slack.git ~/.claude/claude-slack
 cd ~/.claude/claude-slack
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2. Add to PATH
+# Add to PATH
 echo 'export PATH="$HOME/.claude/claude-slack/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
+```
 
-# 3. Create Slack app (see Setup section below)
+### Step 3: Configure Tokens
 
-# 4. Configure tokens
+```bash
 cp .env.example .env
-nano .env  # Add SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SLACK_CHANNEL
+nano .env
+```
 
-# 5. Start a session (listener starts automatically, channel created if needed)
+Add the tokens you copied from Step 1:
+```bash
+SLACK_BOT_TOKEN=xoxb-your-bot-token-here
+SLACK_APP_TOKEN=xapp-your-app-token-here
+SLACK_CHANNEL=#your-default-channel
+```
+
+**Important: Create your default channel first!**
+1. Create the channel in Slack (e.g., `#claude-notifications`)
+2. Invite the bot to the channel: `/invite @YourBotName`
+3. Set `SLACK_CHANNEL=#claude-notifications` in your `.env`
+
+The default channel is used for thread-mode sessions and notifications about new project channels.
+
+### Step 4: Start a Session
+
+```bash
 cd /your/project
 claude-slack -c my-project-channel
 ```
+
+The listener starts automatically, and the channel is created if it doesn't exist.
+
+### Optional: Install Global Hooks
+
+To enable Slack integration for ALL Claude Code sessions (not just those started with `claude-slack`):
+
+```bash
+~/.claude/claude-slack/bin/install-hooks
+```
+
+This installs hooks globally to `~/.claude/hooks/` so any `claude` session gets Slack notifications.
 
 ## How It Works
 
@@ -252,97 +325,6 @@ To use shortcuts:
 3. Select the shortcut
 
 Shortcuts work from any channel or DM - no need to message the bot directly.
-
----
-
-## Setup (One-Time)
-
-### Prerequisites
-- Python 3.10+ (tested on 3.14)
-- Slack workspace with admin access
-- Claude Code CLI installed
-
-### 1. Create Slack App
-
-1. Go to https://api.slack.com/apps → "Create New App" → "From an app manifest"
-2. Select your workspace and paste the contents of [`app-manifest.yaml`](app-manifest.yaml)
-3. Click "Create"
-4. Go to "OAuth & Permissions" → Install to workspace → Copy "Bot User OAuth Token" (`xoxb-...`)
-5. Go to "Basic Information" → "App-Level Tokens" → Generate token with `connections:write` scope → Copy token (`xapp-...`)
-
-The manifest includes:
-- All required OAuth scopes
-- Event subscriptions (messages, reactions, app mentions)
-- Global shortcuts (Get Sessions, Attach, Mode changes)
-- Interactivity for buttons and modals
-
-#### Permission Tiers
-
-| Tier | Scopes | Features |
-|------|--------|----------|
-| **Minimum** | `app_mentions:read`, `channels:history`, `channels:read`, `chat:write`, `reactions:read`, `reactions:write`, `users:read` | Basic messaging, emoji reactions |
-| **Recommended** | All minimum + `channels:join`, `channels:manage`, `chat:write.public`, `groups:*`, `im:*`, `mpim:*` | Auto-create channels, private channels, DMs |
-
-**With minimum permissions:**
-- You must manually create channels and invite the bot (`/invite @Claude Code Bot`)
-- Private channels and DMs won't work
-
-**With recommended permissions:**
-- Channels created automatically with `claude-slack -c channel-name`
-- Full DM mode support
-- Private channel support
-
-#### Scope Reference
-
-| Scope | Purpose | Required? |
-|-------|---------|-----------|
-| `app_mentions:read` | Receive @mentions | Yes |
-| `channels:history` | Read threaded replies | Yes |
-| `channels:read` | List/find channels | Yes |
-| `chat:write` | Post messages | Yes |
-| `reactions:read` | Read emoji reactions for approvals | Yes |
-| `reactions:write` | Add confirmation reactions | Yes |
-| `users:read` | Display user names | Yes |
-| `channels:join` | Auto-join public channels | No (manual invite) |
-| `channels:manage` | Auto-create channels | No (manual create) |
-| `chat:write.public` | Post without joining | No |
-| `groups:*` | Private channel support | No |
-| `im:history` | Read DM messages | **Yes for DM Mode** |
-| `im:read` | View DMs | **Yes for DM Mode** |
-| `im:write` | Send DMs | **Yes for DM Mode** |
-| `mpim:*` | Group DM support | No |
-
-**Note:** DM Mode requires the `im:*` scopes AND the `message.im` event subscription. If you can't DM the bot, reinstall the app after adding these scopes.
-
-### 2. Configure Environment
-
-```bash
-cp .env.example .env
-nano .env
-```
-
-```bash
-SLACK_BOT_TOKEN=xoxb-your-bot-token-here
-SLACK_APP_TOKEN=xapp-your-app-token-here
-SLACK_CHANNEL=#your-default-channel
-```
-
-### 3. Default Channel Setup (Required)
-
-The `SLACK_CHANNEL` environment variable defines your **default channel**:
-- **Home base** for thread-mode sessions
-- **Notification channel** for alerts about new custom channels
-- **Fallback** when no custom channel is specified
-
-### 4. Install Global Hooks (Optional)
-
-To enable Slack integration for ALL Claude Code sessions (not just those started with `claude-slack`):
-
-```bash
-~/.claude/claude-slack/bin/install-hooks
-```
-
-This installs hooks globally to `~/.claude/hooks/` so any `claude` session gets Slack notifications.
 
 ---
 
