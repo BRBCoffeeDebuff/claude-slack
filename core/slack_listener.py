@@ -91,8 +91,16 @@ try:
 except KeyError:
     _slack_app_error = "SLACK_BOT_TOKEN environment variable not set"
     # Create a dummy app for testing - decorators will work but do nothing
+    class _DummyClient:
+        """Dummy client that returns safe defaults for all methods."""
+        def __getattr__(self, name):
+            # Return a callable that returns empty dict for any method
+            return lambda *args, **kwargs: {}
+
     class _DummyApp:
         """Dummy App class that accepts decorators but does nothing."""
+        def __init__(self):
+            self.client = _DummyClient()
         def event(self, *args, **kwargs):
             return lambda f: f
         def action(self, *args, **kwargs):
